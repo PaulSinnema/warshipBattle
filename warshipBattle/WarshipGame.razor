@@ -1,0 +1,402 @@
+﻿@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+<canvas id="sea" class="sea"></canvas>
+
+<div class="version">v@(AppVersion)</div>
+
+<canvas id="minimap" class="minimap" width="150" height="150"></canvas>
+
+<div class="zoom">
+    <button data-key="ZoomIn" title="Inzoomen (+ of scrollwiel)">+</button>
+    <button data-key="ZoomOut" title="Uitzoomen (− of scrollwiel)">−</button>
+</div>
+
+<div class="rotate"><span>⟳</span>Draai je telefoon naar liggend</div>
+
+@if (state == "playing")
+{
+    <div class="hud">
+        <div class="coins">🪙 @FormatCoins(coins)</div>
+        <div>@Current.Name &nbsp;•&nbsp; @ActiveDiff.Name</div>
+        <div>Verslagen: @kills &nbsp;•&nbsp; Vijanden: @enemies</div>
+        <div class="health"><div class="health-bar" style="@($"width:{health}%")"></div></div>
+        <div class="repair">🔧 @StatusText(repairState, "R")</div>
+        @if (Current.Special != "")
+        {
+            <div class="repair">⚡ @Current.SpecialName: @StatusText(specialState, "F")</div>
+        }
+        @if (jetsAir >= 0)
+        {
+            <div class="repair">✈ Straaljagers in de lucht: @jetsAir / @Current.Jets</div>
+            @if (jetCooldown > 0)
+            {
+                <div class="repair">✈ Bijtanken en herbewapenen: @(jetCooldown)s</div>
+            }
+        }
+    </div>
+    <button class="pause-btn" @onclick="Pause">II</button>
+}
+
+<div class="touch">
+    <div class="pad">
+        <span></span><button data-key="KeyW">▲</button><span></span>
+        <button data-key="KeyA">◀</button><button data-key="KeyS">▼</button><button data-key="KeyD">▶</button>
+    </div>
+    <div class="right">
+        <button class="fix" data-key="KeyF">⚡</button>
+        <button class="fix" data-key="KeyR">🔧</button>
+        <button class="stop" data-key="KeyX">STOP</button>
+    </div>
+</div>
+
+@if (showShop)
+{
+    <div class="overlay shop">
+        <h1>SCHEEPSWERF</h1>
+        <div class="coins">🪙 @FormatCoins(coins)</div>
+        @if (CanRepair)
+        {
+            <div class="repair-row">
+                Schade: @(100 - health)% &nbsp;
+                <button class="alt" disabled="@(coins < RepairCost)" @onclick="RepairShip">Repareren 🪙 @FormatCoins(RepairCost)</button>
+            </div>
+        }
+        <div class="ships">
+            @foreach (var s in ShipCatalog.All)
+            {
+                <div class="card @(s.Id == selectedId ? "sel" : "")">
+                    <canvas id="@($"prev-{s.Id}")" class="preview" width="200" height="56"></canvas>
+                    <h3>@s.Name</h3>
+                    <div class="desc">@s.Description</div>
+                    @if (s.Special != "")
+                    {
+                        <div class="special">⚡ @s.SpecialName &nbsp;•&nbsp; @s.SpecialCooldown s</div>
+                    }
+                    @if (s.Jets > 0)
+                    {
+                        <div class="special">✈ @s.Jets straaljagers met bommen (1 start per 5 s, daarna 25 s pauze)</div>
+                    }
+                    <table class="stats">
+                        <tr><td>Kanonnen</td><td>@s.GunLabel</td></tr>
+                        <tr><td>Pantser</td><td>@s.Hp</td></tr>
+                        <tr><td>Snelheid</td><td>@s.Speed</td></tr>
+                        <tr><td>Roer</td><td>@s.Turn °/s</td></tr>
+                        <tr><td>Torens draaien</td><td>@s.TurretTurn °/s</td></tr>
+                        <tr><td>Herladen</td><td>@s.Reload.ToString("0.0", CultureInfo.InvariantCulture) s</td></tr>
+                        <tr><td>Schade</td><td>@s.Damage</td></tr>
+                        <tr><td>Bereik</td><td>@s.Range</td></tr>
+                    </table>
+                    @if (s.Id == selectedId)
+                    {
+                        <button disabled>Geselecteerd</button>
+                    }
+                    else if (owned.Contains(s.Id))
+                    {
+                        <button @onclick="() => SelectShip(s)">Kiezen</button>
+                    }
+                    else
+                    {
+                        <button disabled="@(coins < s.Price)" @onclick="() => BuyShip(s)">Kopen 🪙 @FormatCoins(s.Price)</button>
+                    }
+                </div>
+            }
+        </div>
+        <button @onclick="CloseShop">Terug</button>
+    </div>
+}
+else
+{
+    switch (state)
+    {
+        case "loading":
+            <div class="overlay"><h1>WARSHIP BATTLE</h1><div>Laden…</div></div>
+            break;
+        case "start":
+            <div class="overlay">
+                <h1>WARSHIP BATTLE</h1>
+                <div class="controls">
+                    Schakel vijandelijke schepen uit op een eindeloze oceaan.<br />
+                    W/S of ▲▼: vaart &nbsp;•&nbsp; A/D of ◀▶: roer &nbsp;•&nbsp; X: stop &nbsp;•&nbsp; R/🔧: noodreparatie<br />
+                    Muis: torens richten &nbsp;•&nbsp; Klik/spatie: vuren &nbsp;•&nbsp; F/rechtsklik/⚡: speciaal wapen &nbsp;•&nbsp; Esc: pauze &nbsp;•&nbsp; M: geluid aan/uit<br />
+                    Zoomen: scrollwiel, + / − of de knoppen &nbsp;•&nbsp; Telefoon: met twee vingers knijpen<br />
+                    Telefoon: knoppen om te varen, tik op zee om te richten en vuren
+                </div>
+                <div class="diffs">
+                    @foreach (var d in DifficultyCatalog.All)
+                    {
+                        var locked = earned < d.Unlock;
+                        <button class="diff @(d.Id == diffId ? "sel" : "")" disabled="@locked" @onclick="() => SelectDiff(d)">
+                            <b>@d.Name</b>
+                            @if (locked)
+                            {
+                                <span>🔒 vanaf 🪙 @FormatCoins(d.Unlock) verdiend</span>
+                            }
+                            else
+                            {
+                                <span>🪙 @FormatCoins(d.Reward) per schip</span>
+                            }
+                        </button>
+                    }
+                </div>
+                <div class="controls">Schip: <b>@Current.Name</b> &nbsp;•&nbsp; 🪙 @FormatCoins(coins)</div>
+                @if (graphics != "")
+                {
+                    <div class="controls gfx">🖥 @graphics</div>
+                }
+                <div class="buttons">
+                    <button @onclick="StartGame">Start</button>
+                    <button class="alt" @onclick="OpenShop">Scheepswerf</button>
+                </div>
+            </div>
+            break;
+        case "paused":
+            <div class="overlay">
+                <h1>PAUZE</h1>
+                <div class="controls">Pantser: @health% &nbsp;•&nbsp; 🪙 @FormatCoins(coins)</div>
+                <div class="buttons">
+                    <button @onclick="Resume">Verder</button>
+                    @if (CanRepair)
+                    {
+                        <button class="alt" disabled="@(coins < RepairCost)" @onclick="RepairShip">Repareren 🪙 @FormatCoins(RepairCost)</button>
+                    }
+                    <button class="alt" @onclick="OpenShop">Scheepswerf</button>
+                    <button class="alt" @onclick="Stop">Stoppen</button>
+                </div>
+            </div>
+            break;
+        case "gameover":
+            <div class="overlay">
+                <h1>GEZONKEN</h1>
+                <div class="controls">Je schip is gezonken na @kills verslagen vijanden (@ActiveDiff.Name).<br />🪙 @FormatCoins(coins)</div>
+                <div class="buttons">
+                    <button @onclick="StartGame">Opnieuw</button>
+                    <button class="alt" @onclick="Stop">Menu</button>
+                    <button class="alt" @onclick="OpenShop">Scheepswerf</button>
+                </div>
+            </div>
+            break;
+    }
+}
+
+@code {
+    private static readonly string AppVersion = GetVersion();
+    private static readonly string BuildId = typeof(WarshipGame).Assembly
+        .GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "BuildId")?.Value ?? "0";
+    private DotNetObjectReference<WarshipGame>? selfRef;
+    private IJSObjectReference? module;
+    private string state = "loading";
+    private bool showShop;
+    private int kills;
+    private int enemies;
+    private int health = 100;
+    private int coins;
+    private int earned;
+    private readonly HashSet<string> owned = new() { "fregat" };
+    private string selectedId = "fregat";
+    private string diffId = "normaal";
+    private Difficulty ActiveDiff { get; set; } = DifficultyCatalog.Get("normaal");
+
+    private const int RepairCostPerPercent = 20;
+    private int repairState;
+    private int specialState;
+    private int jetsAir = -1;
+    private int jetCooldown;
+    private string graphics = "";
+    private bool previewsDrawn;
+
+    private ShipType Current => ShipCatalog.Get(selectedId);
+
+    private bool CanRepair => state is "playing" or "paused" && health is > 0 and < 100;
+
+    private int RepairCost => (100 - health) * RepairCostPerPercent;
+
+    // -1 = active, 0 = ready, >0 = cooldown seconds
+    private static string StatusText(int value, string key) => value switch
+    {
+        < 0 => "actief…",
+        0 => $"gereed ({key})",
+        _ => $"{value}s"
+    };
+
+    private static string GetVersion()
+    {
+        var info = typeof(WarshipGame).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0";
+        var plus = info.IndexOf('+');
+        return plus >= 0 ? info[..plus] : info;
+    }
+
+    private static string FormatCoins(int value) =>
+        value.ToString("N0", CultureInfo.InvariantCulture).Replace(',', '.');
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            await DrawPreviews();
+            return;
+        }
+
+        // Background update check (GitHub Pages)
+        await JS.InvokeVoidAsync("wbUpdater.start", AppVersion);
+        await LoadProgress();
+
+        selfRef = DotNetObjectReference.Create(this);
+        // Version query busts the browser/CDN cache for the game script
+        module = await JS.InvokeAsync<IJSObjectReference>("import", $"./js/game.js?v={AppVersion}-{BuildId}");
+        await module.InvokeVoidAsync("init", "sea", "minimap", selfRef);
+
+        state = "start";
+        StateHasChanged();
+    }
+
+    private async Task<int> LoadInt(string key)
+    {
+        var v = await JS.InvokeAsync<string?>("localStorage.getItem", key);
+        return int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
+    }
+
+    private async Task LoadProgress()
+    {
+        try
+        {
+            coins = await LoadInt("wb-coins");
+            earned = await LoadInt("wb-earned");
+
+            var o = await JS.InvokeAsync<string?>("localStorage.getItem", "wb-owned");
+            if (!string.IsNullOrEmpty(o))
+                foreach (var id in o.Split(',', StringSplitOptions.RemoveEmptyEntries)) owned.Add(id);
+
+            var s = await JS.InvokeAsync<string?>("localStorage.getItem", "wb-selected");
+            if (s is not null && owned.Contains(s)) selectedId = s;
+
+            var d = DifficultyCatalog.Get(await JS.InvokeAsync<string?>("localStorage.getItem", "wb-diff"));
+            if (earned >= d.Unlock) diffId = d.Id;
+        }
+        catch (JSException) { }
+    }
+
+    private async Task SaveProgress()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("localStorage.setItem", "wb-coins", coins.ToString(CultureInfo.InvariantCulture));
+            await JS.InvokeVoidAsync("localStorage.setItem", "wb-earned", earned.ToString(CultureInfo.InvariantCulture));
+            await JS.InvokeVoidAsync("localStorage.setItem", "wb-owned", string.Join(',', owned));
+            await JS.InvokeVoidAsync("localStorage.setItem", "wb-selected", selectedId);
+            await JS.InvokeVoidAsync("localStorage.setItem", "wb-diff", diffId);
+        }
+        catch (JSException) { }
+    }
+
+    private async Task SelectDiff(Difficulty d)
+    {
+        if (earned < d.Unlock) return;
+        diffId = d.Id;
+        await SaveProgress();
+    }
+
+    private async Task StartGame()
+    {
+        showShop = false;
+        ActiveDiff = DifficultyCatalog.Get(diffId);
+        if (module is not null) await module.InvokeVoidAsync("startGame", Current, ActiveDiff);
+    }
+
+    private async Task Pause()
+    {
+        if (module is not null) await module.InvokeVoidAsync("setPaused", true);
+    }
+
+    private async Task Resume()
+    {
+        if (module is not null) await module.InvokeVoidAsync("setPaused", false);
+    }
+
+    private async Task Stop()
+    {
+        if (module is not null) await module.InvokeVoidAsync("stopGame");
+    }
+
+    private void OpenShop()
+    {
+        showShop = true;
+        previewsDrawn = false;
+    }
+
+    private void CloseShop() => showShop = false;
+
+    private async Task DrawPreviews()
+    {
+        if (!showShop || previewsDrawn || module is null) return;
+        previewsDrawn = true;
+        foreach (var s in ShipCatalog.All)
+            await module.InvokeVoidAsync("drawPreview", $"prev-{s.Id}", s);
+    }
+
+    private async Task RepairShip()
+    {
+        if (!CanRepair || coins < RepairCost || module is null) return;
+        coins -= RepairCost;
+        await SaveProgress();
+        await module.InvokeVoidAsync("repairFull");
+    }
+
+    private async Task BuyShip(ShipType ship)
+    {
+        if (coins < ship.Price || owned.Contains(ship.Id)) return;
+        coins -= ship.Price;
+        owned.Add(ship.Id);
+        await SelectShip(ship);
+    }
+
+    private async Task SelectShip(ShipType ship)
+    {
+        selectedId = ship.Id;
+        await SaveProgress();
+        // Swaps the ship in a running (paused) game
+        if (module is not null) await module.InvokeVoidAsync("setShip", ship);
+    }
+
+    [JSInvokable]
+    public void OnStatus(string newState, int newKills, int enemiesLeft, int newHealth, int newRepair, int newSpecial, int newJets, int newJetCooldown)
+    {
+        jetsAir = newJets;
+        jetCooldown = newJetCooldown;
+        state = newState;
+        kills = newKills;
+        enemies = enemiesLeft;
+        health = newHealth;
+        repairState = newRepair;
+        specialState = newSpecial;
+        if (newState == "playing") showShop = false;
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public void OnGraphics(string info)
+    {
+        graphics = info;
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public async Task OnKill()
+    {
+        coins += ActiveDiff.Reward;
+        earned += ActiveDiff.Reward;
+        await SaveProgress();
+        StateHasChanged();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (module is not null)
+        {
+            try { await module.DisposeAsync(); }
+            catch (JSDisconnectedException) { }
+        }
+        selfRef?.Dispose();
+    }
+}

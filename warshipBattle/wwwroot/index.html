@@ -1,0 +1,129 @@
+﻿<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#0d2236" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>Warship Battle</title>
+    <base href="/" />
+    <link rel="preload" id="webassembly" />
+    <style>
+        html, body { margin: 0; height: 100%; overflow: hidden; background: #0d2236; color: #fff; font-family: system-ui, "Segoe UI", Arial, sans-serif; user-select: none; -webkit-user-select: none; touch-action: none; }
+        #app { height: 100%; }
+        .sea { position: fixed; inset: 0; display: block; cursor: crosshair; }
+        .version { position: fixed; top: calc(8px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right)); z-index: 40; font-size: 14px; opacity: .9; text-shadow: 0 0 3px #000; }
+        .minimap { position: fixed; top: calc(32px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right)); width: 150px; height: 150px; z-index: 10; border: 1px solid rgba(255,255,255,.5); }
+        .hud { position: fixed; top: calc(8px + env(safe-area-inset-top)); left: calc(12px + env(safe-area-inset-left)); z-index: 10; font-size: 16px; line-height: 1.5; text-shadow: 0 0 3px #000; pointer-events: none; }
+        .hud .coins { font-size: 20px; font-weight: bold; color: #ffd75a; }
+        .health { width: 180px; height: 12px; margin-top: 4px; border: 1px solid #fff; background: rgba(0,0,0,.4); }
+        .health-bar { height: 100%; background: #4c4; transition: width .2s; }
+        .pause-btn { position: fixed; bottom: calc(16px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); z-index: 15; width: 48px; height: 40px; border-radius: 8px; border: 1px solid rgba(255,255,255,.45); background: rgba(0,0,0,.35); color: #fff; font-weight: bold; cursor: pointer; }
+        .overlay { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 16px; background: rgba(5,15,30,.6); }
+        .overlay.banner { background: none; pointer-events: none; text-shadow: 0 0 6px #000; }
+        .overlay h1 { margin: 0 0 12px; font-size: 44px; letter-spacing: 4px; }
+        .overlay button { padding: 10px 30px; font-size: 20px; border: 0; border-radius: 6px; background: #c8a63c; color: #111; cursor: pointer; }
+        .overlay button.alt { background: #3c6e9c; color: #fff; }
+        .overlay button:disabled { opacity: .45; cursor: default; }
+        .buttons { margin-top: 20px; display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+        .controls { font-size: 15px; line-height: 1.7; opacity: .9; margin-top: 6px; }
+        .shop { justify-content: flex-start; overflow-y: auto; background: rgba(5,15,30,.92); touch-action: pan-y; }
+        .shop .coins { font-size: 22px; color: #ffd75a; margin-bottom: 12px; }
+        .ships { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; max-width: 1200px; margin-bottom: 16px; }
+        .card { width: 210px; padding: 12px; border-radius: 8px; background: rgba(255,255,255,.08); border: 2px solid transparent; display: flex; flex-direction: column; }
+        .card.sel { border-color: #c8a63c; }
+        .card h3 { margin: 0 0 6px; font-size: 17px; }
+        .card .desc { font-size: 13px; opacity: .8; min-height: 34px; }
+        .card .stats { width: 100%; font-size: 13px; margin: 8px 0; border-collapse: collapse; text-align: left; }
+        .card .stats td:last-child { text-align: right; }
+        .card button { margin-top: auto; font-size: 15px; padding: 8px 10px; }
+        .touch { position: fixed; left: 0; right: 0; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 15; display: none; justify-content: space-between; align-items: flex-end; padding: 0 calc(16px + env(safe-area-inset-right)) 0 calc(16px + env(safe-area-inset-left)); pointer-events: none; }
+        @media (pointer: coarse) { .touch { display: flex; } }
+        .touch .pad { display: grid; grid-template-columns: repeat(3, 58px); grid-template-rows: repeat(2, 58px); gap: 6px; pointer-events: auto; }
+        .touch button { background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.45); color: #fff; border-radius: 10px; font-size: 22px; touch-action: none; -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; }
+        .touch .stop { width: 80px; height: 58px; font-size: 15px; pointer-events: auto; background: rgba(220,60,40,.45); }
+        .touch .right { display: flex; gap: 8px; pointer-events: auto; }
+        .touch .fix { width: 58px; height: 58px; background: rgba(60,160,220,.45); }
+        .hud .repair { font-size: 14px; margin-top: 2px; }
+        .card .preview { width: 100%; height: auto; border-radius: 4px; margin-bottom: 8px; }
+        .repair-row { margin-bottom: 14px; font-size: 16px; }
+        .zoom { position: fixed; top: calc(190px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right)); z-index: 15; display: flex; gap: 6px; }
+        .zoom button { width: 36px; height: 36px; border-radius: 8px; border: 1px solid rgba(255,255,255,.45); background: rgba(0,0,0,.35); color: #fff; font-size: 22px; line-height: 1; cursor: pointer; touch-action: none; -webkit-tap-highlight-color: transparent; }
+        @media (max-height: 500px), (max-width: 600px) { .zoom { top: calc(130px + env(safe-area-inset-top)); } }
+        .controls.gfx { font-size: 12px; opacity: .6; }
+        .card .special { font-size: 13px; color: #ffd75a; margin-top: 6px; }
+        .diffs { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin: 16px 0 6px; }
+        .overlay button.diff { display: flex; flex-direction: column; gap: 4px; padding: 8px 16px; font-size: 16px; background: rgba(255,255,255,.12); color: #fff; border: 2px solid transparent; }
+        .overlay button.diff.sel { border-color: #c8a63c; background: rgba(200,166,60,.25); }
+        .overlay button.diff span { font-size: 12px; opacity: .85; }
+        .repair-row button { font-size: 16px; padding: 6px 16px; margin-left: 8px; }
+        .rotate { display: none; position: fixed; inset: 0; z-index: 60; background: #000; flex-direction: column; align-items: center; justify-content: center; text-align: center; font-size: 20px; padding: 24px; }
+        .rotate span { font-size: 64px; margin-bottom: 16px; }
+        @media (pointer: coarse) and (orientation: portrait) { .rotate { display: flex; } }
+        @media (max-height: 500px), (max-width: 600px) {
+            .hud { font-size: 13px; line-height: 1.35; }
+            .hud .coins { font-size: 16px; }
+            .health { width: 110px; height: 9px; }
+            .minimap { width: 96px; height: 96px; top: calc(28px + env(safe-area-inset-top)); }
+            .version { font-size: 12px; }
+            .overlay h1 { font-size: 30px; letter-spacing: 2px; }
+            .overlay button { font-size: 17px; }
+            .controls { font-size: 13px; line-height: 1.5; }
+            .touch .pad { grid-template-columns: repeat(3, 52px); grid-template-rows: repeat(2, 52px); }
+        }
+        #blazor-error-ui { display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; padding: 8px 12px; background: #b32121; }
+        #blazor-error-ui .dismiss { float: right; cursor: pointer; }
+    </style>
+    <script type="importmap"></script>
+    <script>
+        // Auto-update + recovery from stale cached HTML (GitHub Pages caches ~10 min)
+        (function () {
+            const KEY = 'wb-recover';
+            function reloadFresh(param, value) {
+                const url = new URL(location.href);
+                url.searchParams.set(param, value);
+                location.replace(url.toString());
+            }
+            function recover() {
+                const n = parseInt(sessionStorage.getItem(KEY) || '0', 10);
+                if (n >= 2) return;
+                sessionStorage.setItem(KEY, String(n + 1));
+                reloadFresh('r', Date.now());
+            }
+            window.wbRecover = recover;
+            const watchdog = setTimeout(recover, 45000);
+            let current = null;
+            async function check() {
+                if (!current) return;
+                try {
+                    const res = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    if (data.version && data.version !== current) reloadFresh('v', data.version);
+                } catch { }
+            }
+            window.wbUpdater = {
+                start(version) {
+                    current = version;
+                    clearTimeout(watchdog);
+                    sessionStorage.removeItem(KEY);
+                    check();
+                    setInterval(check, 60000);
+                    document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+                    window.addEventListener('focus', check);
+                }
+            };
+        })();
+    </script>
+</head>
+<body>
+    <div id="app"></div>
+    <div id="blazor-error-ui">
+        Er is een fout opgetreden. <a href="." class="reload">Herladen</a>
+        <span class="dismiss">✕</span>
+    </div>
+    <script src="_framework/blazor.webassembly#[.{fingerprint}].js" onerror="wbRecover()"></script>
+</body>
+</html>
