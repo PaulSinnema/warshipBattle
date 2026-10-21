@@ -19,7 +19,7 @@
     <div class="hud">
         <div class="coins">🪙 @FormatCoins(coins)</div>
         <div>@Current.Name &nbsp;•&nbsp; @ActiveDiff.Name</div>
-        <div>Verslagen: @kills &nbsp;•&nbsp; Vijanden: @enemies</div>
+        <div>Verslagen: @kills</div>
         <div class="health"><div class="health-bar" style="@($"width:{health}%")"></div></div>
         <div class="repair">🔧 @StatusText(repairState, "R")</div>
         @if (Current.Special != "")
@@ -33,20 +33,39 @@
             {
                 <div class="repair">✈ Bijtanken en herbewapenen: @(jetCooldown)s</div>
             }
+            else if (jetCooldown < 0)
+            {
+                <div class="repair">✈ Wachten tot alle straaljagers geland zijn</div>
+            }
         }
     </div>
     <button class="pause-btn" @onclick="Pause">II</button>
 }
 
 <div class="touch">
-    <div class="pad">
-        <span></span><button data-key="KeyW">▲</button><span></span>
-        <button data-key="KeyA">◀</button><button data-key="KeyS">▼</button><button data-key="KeyD">▶</button>
+    @* Steering wheel: drag around to turn, tap the hub to centre the rudder *@
+    <div class="wheel" id="wheel">
+        <div class="wheel-rim" id="wheelRim">
+            <i style="transform:rotate(0deg)"></i><i style="transform:rotate(45deg)"></i>
+            <i style="transform:rotate(90deg)"></i><i style="transform:rotate(135deg)"></i>
+            <b></b>
+        </div>
+        <div class="wheel-hub" id="wheelHub">⎈</div>
     </div>
     <div class="right">
-        <button class="fix" data-key="KeyF">⚡</button>
-        <button class="fix" data-key="KeyR">🔧</button>
-        <button class="stop" data-key="KeyX">STOP</button>
+        <div class="btns">
+            <button class="fix" data-key="KeyF" title="Speciaal wapen">⚡</button>
+            <button class="fix" data-key="KeyR" title="Noodreparatie">🔧</button>
+            <button class="fix auto" id="autoBtn" title="Automatisch richten en vuren">🎯</button>
+            <button class="fix" id="fireBtn" title="Vuur (houd ingedrukt)">💥</button>
+        </div>
+        @* Throttle lever: drag up = forward, down = reverse; snaps to stop *@
+        <div class="throttle" id="throttle">
+            <div class="thr-mark" style="top:0">VOL</div>
+            <div class="thr-mark zero">STOP</div>
+            <div class="thr-mark" style="bottom:0">ACHT.</div>
+            <div class="thr-knob" id="thrKnob"><span id="thrLabel">0%</span></div>
+        </div>
     </div>
 </div>
 
@@ -75,7 +94,7 @@
                     }
                     @if (s.Jets > 0)
                     {
-                        <div class="special">✈ @s.Jets straaljagers met bommen (1 start per 5 s, daarna 25 s pauze)</div>
+                        <div class="special">✈ @s.Jets straaljagers, elk 5 bommen die een schip in één keer vernietigen (1 start per 15 s, na een ronde 1 min bijtanken)</div>
                     }
                     <table class="stats">
                         <tr><td>Kanonnen</td><td>@s.GunLabel</td></tr>

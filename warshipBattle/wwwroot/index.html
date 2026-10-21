@@ -41,10 +41,20 @@
         .card button { margin-top: auto; font-size: 15px; padding: 8px 10px; }
         .touch { position: fixed; left: 0; right: 0; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 15; display: none; justify-content: space-between; align-items: flex-end; padding: 0 calc(16px + env(safe-area-inset-right)) 0 calc(16px + env(safe-area-inset-left)); pointer-events: none; }
         @media (pointer: coarse) { .touch { display: flex; } }
-        .touch .pad { display: grid; grid-template-columns: repeat(3, 58px); grid-template-rows: repeat(2, 58px); gap: 6px; pointer-events: auto; }
+        .touch .wheel { position: relative; width: 150px; height: 150px; pointer-events: auto; touch-action: none; -webkit-tap-highlight-color: transparent; }
+        .touch .wheel-rim { position: absolute; inset: 0; border-radius: 50%; border: 9px solid rgba(150,105,60,.85); box-shadow: 0 0 0 2px rgba(0,0,0,.35), inset 0 0 0 2px rgba(0,0,0,.3); background: rgba(0,0,0,.15); }
+        .touch .wheel-rim i { position: absolute; left: 50%; top: -6px; bottom: -6px; width: 6px; margin-left: -3px; background: rgba(150,105,60,.85); border-radius: 3px; }
+        .touch .wheel-rim b { position: absolute; left: 50%; top: -16px; width: 10px; height: 14px; margin-left: -5px; background: #e8c34a; border-radius: 3px; }
+        .touch .wheel-hub { position: absolute; left: 50%; top: 50%; width: 46px; height: 46px; margin: -23px 0 0 -23px; border-radius: 50%; background: rgba(60,40,22,.95); color: #e8c34a; font-size: 26px; display: flex; align-items: center; justify-content: center; border: 2px solid rgba(255,255,255,.4); }
+        .touch .btns { display: grid; grid-template-columns: repeat(2, 58px); gap: 8px; }
+        .touch .auto.on { background: rgba(60,200,90,.6); border-color: #9f9; }
+        .touch .throttle { position: relative; width: 64px; height: 170px; border-radius: 12px; background: linear-gradient(rgba(60,200,90,.25), rgba(255,255,255,.08) 66%, rgba(220,80,60,.3)); border: 1px solid rgba(255,255,255,.45); touch-action: none; }
+        .touch .thr-mark { position: absolute; left: 0; right: 0; text-align: center; font-size: 10px; opacity: .75; pointer-events: none; }
+        .touch .thr-mark.zero { top: 66.6%; margin-top: -6px; border-top: 1px dashed rgba(255,255,255,.5); padding-top: 1px; }
+        .touch .thr-knob { position: absolute; left: 4px; right: 4px; height: 34px; margin-top: -17px; top: 66.6%; border-radius: 8px; background: rgba(230,235,240,.9); color: #123; font-size: 13px; font-weight: bold; display: flex; align-items: center; justify-content: center; pointer-events: none; }
         .touch button { background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.45); color: #fff; border-radius: 10px; font-size: 22px; touch-action: none; -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; }
         .touch .stop { width: 80px; height: 58px; font-size: 15px; pointer-events: auto; background: rgba(220,60,40,.45); }
-        .touch .right { display: flex; gap: 8px; pointer-events: auto; }
+        .touch .right { display: flex; gap: 10px; align-items: flex-end; pointer-events: auto; }
         .touch .fix { width: 58px; height: 58px; background: rgba(60,160,220,.45); }
         .hud .repair { font-size: 14px; margin-top: 2px; }
         .card .preview { width: 100%; height: auto; border-radius: 4px; margin-bottom: 8px; }
@@ -71,7 +81,10 @@
             .overlay h1 { font-size: 30px; letter-spacing: 2px; }
             .overlay button { font-size: 17px; }
             .controls { font-size: 13px; line-height: 1.5; }
-            .touch .pad { grid-template-columns: repeat(3, 52px); grid-template-rows: repeat(2, 52px); }
+            .touch .wheel { width: 124px; height: 124px; }
+            .touch .btns { grid-template-columns: repeat(2, 48px); gap: 6px; }
+            .touch .fix { width: 48px; height: 48px; font-size: 19px; }
+            .touch .throttle { width: 56px; height: 140px; }
         }
         #blazor-error-ui { display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; padding: 8px 12px; background: #b32121; }
         #blazor-error-ui .dismiss { float: right; cursor: pointer; }

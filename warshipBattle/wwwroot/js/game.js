@@ -1,22 +1,48 @@
 ﻿// Warship Battle - top-down naval combat on an endless 2D ocean
 const DEG = Math.PI / 180;
-const CHUNK = 1200;           // island generation cell size
-const MINI_RANGE = 3000;      // half-width of the minimap view
-const DESPAWN_DIST = 4200;    // enemies further away are removed
+const CHUNK = 9000;           // island generation cell size
+const ISLAND_CHANCE = 0.8;    // chance a chunk holds an island
+const ISLAND_ASPECT = [1.8, 3.2];  // length / width range of islands
+const ISLAND_BASE_MAX_R = 2400;    // radius of a round island with the same area
+const HOVER = { land: 0.35 };  // hovercraft: speed factor on land
+const ISLAND_MIN_R = 500;     // smallest equal-area radius
+const ISLAND_MAX_R = Math.ceil(ISLAND_BASE_MAX_R * Math.sqrt(ISLAND_ASPECT[1]));   // largest coast radius (search range)
+const MINI_RANGE = 3000;      // minimum half-width of the radar map view
+const DESPAWN_DIST = 6000;    // enemies further away are removed
+const RANGE_FACTOR = 2.5;     // gun range multiplier (realistic long-range gunnery)
+const MG_RANGE_FACTOR = 1.5;  // machine guns stay short-ranged
+const SHELL_FACTOR = 1.6;     // shell speed multiplier so long shots still arrive
+const RADAR_RPM = 2.6;        // radar antenna rotation (rad/s)
+// Ships fitted with a search radar (radar map + rotating antenna)
+const RADAR_SHIPS = new Set(['fregat', 'jager', 'kruiser', 'horzel', 'valk', 'zwaar', 'orka', 'arend', 'titan', 'schim', 'furie', 'zeus', 'poseidon', 'leviathan',
+    'zeeslang', 'bever', 'kraken', 'vulkaan', 'ragnarok', 'schildpad', 'bastion', 'bliksem', 'tempest', 'ooievaar', 'feniks', 'hydra', 'storm', 'tornado']);
 let maxParticles = 2500;     // set by the quality level
 const REPAIR_TIME = 6;        // seconds of damage control
 const REPAIR_FRACTION = 0.3;  // part of max HP restored per repair
 const REPAIR_COOLDOWN = 40;   // seconds before next damage control
-const SPAWN_DELAY = 4;        // seconds between enemy reinforcements
+const SPAWN_DELAY = 2.5;      // seconds between enemy reinforcements
+const SPAWN_MIN = 900;        // enemies never appear closer than this
+const SPAWN_MAX = 3200;       // ...or further than this
+const ENEMY_MIN = 1, ENEMY_MAX = 4;   // number of enemy ships alive at once
+const MAX_ATTACKERS = 2;      // enemies allowed to attack at the same time
+const SPAWN_SPREAD = 45;      // reinforcements arrive within ± this many degrees of one direction
+const MG_MAG = 20;            // machine gun rounds per belt
+const MG_RELOAD = 3;          // seconds to load a new belt
 const TORPEDO = { speed: 170, range: 1400, damage: 90, spread: 6 };
 const MINE = { damage: 80, arm: 1.5, life: 90, max: 15 };
-const MISSILE = { speed0: 60, maxSpeed: 380, accel: 260, turn: 3.2, life: 7, damage: 70, seek: 1800, boost: 0.35 };
+const MISSILE = { speed0: 60, maxSpeed: 420, accel: 260, turn: 3.2, life: 16, damage: 70, seek: 4500, boost: 0.35 };
 // Carrier fighter jets: fly out, drop one bomb, return to rearm
-const JET = { speed: 300, accel: 120, turn: 2.2, bombDmg: 35, dropDist: 75, range: 2600, bombFall: 0.9,
-    launchInterval: 5, sortieCooldown: 25, catHold: 1.2, catAccel: 260, approachDist: 450, landSpeed: 150, trapDecel: 260,
+const JET = { speed: 300, accel: 120, turn: 2.2, bombs: 5, dropDist: 75, bombFall: 0.9,
+    launchInterval: 15, sortieCooldown: 60, catHold: 1.2, catAccel: 260, approachDist: 450, landSpeed: 150, trapDecel: 260,
     taxiSpeed: 32, taxiTurn: 2.5, holdRadius: 560 };
 const OVERDRIVE = { time: 6, factor: 2.5 };
 const SMOKE = { time: 8, seeDist: 300 };
+// New specials
+const SEEKMINE = { range: 420, speed: 55, life: 120 };          // homing mines drift towards enemies
+const BARRAGE = { speed: 700, damage: 22, scatter: 140, interval: 0.07 };  // unguided rocket salvo
+const SHIELD = { time: 8, reduce: 0.7 };                         // active armour: damage reduction
+const EMP = { radius: 1400, stun: 6 };                           // disables enemy engines and guns
+const HEAL = { time: 8, fraction: 0.45 };                        // repair crews: part of max HP over time
 const GROUND = { cooldown: 0.5, factor: 0.25, min: 3 };  // island collision damage
 const SUN = { x: 0.6, y: 0.8 };   // shadow direction (screen space)
 let spriteScale = 2;              // resolution of cached ship/island sprites
@@ -28,12 +54,38 @@ const LAYOUTS = {
     4: [0.32, 0.15, -0.17, -0.34],
     5: [0.34, 0.19, -0.17, -0.3, -0.42]
 };
-// Enemy classes; reload is deliberately long
+// Enemy classes; reload is deliberately long. w = spawn weight, torp = torpedoes per salvo,
+// weapon 'mg' = machine guns, hover = hovercraft (crosses land)
 const ENEMY_TYPES = [
-    { name: 'Patrouille', hp: 50, speed: 85, accel: 22, turn: 40, turretTurn: 30, reload: 5.0, damage: 8, shellSpeed: 420, range: 560, spread: 1.6, length: 85, width: 20, turrets: 2, barrels: 1, bow: -0.05, style: 'jager', hull: '#5a3a34', deck: '#7d625a', turret: '#4a3430' },
-    { name: 'Torpedojager', hp: 80, speed: 70, accel: 18, turn: 32, turretTurn: 24, reload: 5.5, damage: 10, shellSpeed: 420, range: 620, spread: 1.6, length: 105, width: 24, turrets: 3, barrels: 2, bow: 0.15, style: 'fregat', hull: '#5c3432', deck: '#7a5752', turret: '#4a2c2a' },
-    { name: 'Kruiser', hp: 140, speed: 58, accel: 14, turn: 26, turretTurn: 20, reload: 6.0, damage: 14, shellSpeed: 440, range: 720, spread: 1.4, length: 135, width: 30, turrets: 4, barrels: 2, bow: 0.1, style: 'kruiser', hull: '#52302e', deck: '#74524c', turret: '#432826' }
+    // Small craft
+    { w: 10, name: 'Patrouille', hp: 50, speed: 85, accel: 22, turn: 40, turretTurn: 30, reload: 5.0, damage: 8, shellSpeed: 420, range: 560, spread: 1.6, length: 85, width: 20, turrets: 2, barrels: 1, bow: -0.05, style: 'jager', hull: '#5a3a34', deck: '#7d625a', turret: '#4a3430' },
+    { w: 6, name: 'MG-boot', hp: 40, speed: 120, accel: 35, turn: 55, turretTurn: 90, reload: 0.14, damage: 1.2, shellSpeed: 850, range: 420, spread: 2.6, length: 70, width: 17, turrets: 2, barrels: 2, bow: -0.05, style: 'jager', hull: '#4a3d33', deck: '#6e5f52', turret: '#2e2620', weapon: 'mg', turretSize: 13 },
+    { w: 6, name: 'Kanonneerboot', hp: 65, speed: 75, accel: 20, turn: 36, turretTurn: 26, reload: 5.5, damage: 14, shellSpeed: 430, range: 600, spread: 1.5, length: 80, width: 22, turrets: 1, barrels: 2, bow: 0.1, style: 'fregat', hull: '#5e4030', deck: '#82654f', turret: '#46301f' },
+    { w: 5, name: 'Torpedoboot', hp: 45, speed: 115, accel: 30, turn: 48, turretTurn: 34, reload: 5.5, damage: 6, shellSpeed: 420, range: 520, spread: 1.8, length: 78, width: 18, turrets: 1, barrels: 1, bow: -0.05, style: 'jager', hull: '#3e3a44', deck: '#625e6a', turret: '#2e2a34', torp: 2 },
+    { w: 4, name: 'Snelle aanvalsboot', hp: 55, speed: 130, accel: 40, turn: 52, turretTurn: 40, reload: 4.5, damage: 7, shellSpeed: 440, range: 540, spread: 1.7, length: 82, width: 19, turrets: 2, barrels: 1, bow: -0.08, style: 'jager', hull: '#44302a', deck: '#6a5048', turret: '#33221e', torp: 1 },
+    { w: 4, name: 'Hovercraft-raider', hp: 55, speed: 150, accel: 45, turn: 55, turretTurn: 80, reload: 0.16, damage: 1.1, shellSpeed: 820, range: 400, spread: 2.8, length: 72, width: 32, turrets: 1, barrels: 2, bow: 0.35, style: 'hover', hull: '#5c4a3a', deck: '#857260', turret: '#3a2e24', weapon: 'mg', turretSize: 14, turretSlots: [0.36, 0], hover: true },
+    { w: 5, name: 'Kustwachter', hp: 70, speed: 90, accel: 24, turn: 38, turretTurn: 30, reload: 5.0, damage: 9, shellSpeed: 430, range: 580, spread: 1.5, length: 92, width: 21, turrets: 2, barrels: 1, bow: 0.05, style: 'jager', hull: '#6a4a3a', deck: '#8e7060', turret: '#4e3426' },
+    { w: 5, name: 'Korvet', hp: 75, speed: 95, accel: 25, turn: 38, turretTurn: 32, reload: 4.8, damage: 9, shellSpeed: 440, range: 600, spread: 1.5, length: 95, width: 21, turrets: 2, barrels: 2, bow: -0.02, style: 'jager', hull: '#503632', deck: '#765a54', turret: '#3e2824' },
+    // Escorts
+    { w: 8, name: 'Torpedojager', hp: 80, speed: 70, accel: 18, turn: 32, turretTurn: 24, reload: 5.5, damage: 10, shellSpeed: 420, range: 620, spread: 1.6, length: 105, width: 24, turrets: 3, barrels: 2, bow: 0.15, style: 'fregat', hull: '#5c3432', deck: '#7a5752', turret: '#4a2c2a', torp: 2 },
+    { w: 6, name: 'Fregat', hp: 95, speed: 72, accel: 18, turn: 30, turretTurn: 26, reload: 5.2, damage: 11, shellSpeed: 440, range: 650, spread: 1.4, length: 112, width: 25, turrets: 3, barrels: 1, bow: 0.12, style: 'fregat', hull: '#4e3a38', deck: '#73605c', turret: '#3a2a28' },
+    { w: 4, name: 'Luchtafweerfregat', hp: 90, speed: 70, accel: 18, turn: 30, turretTurn: 40, reload: 2.6, damage: 6, shellSpeed: 520, range: 600, spread: 1.8, length: 115, width: 25, turrets: 4, barrels: 1, bow: 0.12, style: 'fregat', hull: '#4a4040', deck: '#6e6464', turret: '#383030' },
+    { w: 3, name: 'Mijnenveger', hp: 85, speed: 55, accel: 14, turn: 30, turretTurn: 24, reload: 5.5, damage: 9, shellSpeed: 420, range: 560, spread: 1.6, length: 98, width: 24, turrets: 2, barrels: 1, bow: 0.2, style: 'fregat', hull: '#5a4a32', deck: '#806e52', turret: '#443622' },
+    { w: 3, name: 'Hulpkruiser', hp: 110, speed: 52, accel: 12, turn: 24, turretTurn: 20, reload: 6.0, damage: 11, shellSpeed: 420, range: 640, spread: 1.7, length: 130, width: 28, turrets: 3, barrels: 1, bow: 0.25, style: 'fregat', hull: '#4c3c34', deck: '#9a8a70', turret: '#3a2c24' },
+    { w: 3, name: 'Monitor', hp: 150, speed: 42, accel: 10, turn: 20, turretTurn: 16, reload: 7.5, damage: 28, shellSpeed: 450, range: 800, spread: 1.2, length: 100, width: 32, turrets: 1, barrels: 3, bow: 0.3, style: 'fregat', hull: '#4a3a36', deck: '#6c5a54', turret: '#342622' },
+    // Cruisers
+    { w: 6, name: 'Kruiser', hp: 140, speed: 58, accel: 14, turn: 26, turretTurn: 20, reload: 6.0, damage: 14, shellSpeed: 440, range: 720, spread: 1.4, length: 135, width: 30, turrets: 4, barrels: 2, bow: 0.1, style: 'kruiser', hull: '#52302e', deck: '#74524c', turret: '#432826' },
+    { w: 4, name: 'Lichte kruiser', hp: 120, speed: 68, accel: 16, turn: 30, turretTurn: 24, reload: 5.0, damage: 12, shellSpeed: 450, range: 700, spread: 1.4, length: 122, width: 27, turrets: 3, barrels: 2, bow: 0.06, style: 'kruiser', hull: '#583a36', deck: '#7c5e58', turret: '#46302c' },
+    { w: 3, name: 'Torpedokruiser', hp: 130, speed: 64, accel: 16, turn: 28, turretTurn: 22, reload: 6.0, damage: 12, shellSpeed: 440, range: 700, spread: 1.4, length: 132, width: 28, turrets: 3, barrels: 2, bow: 0.06, style: 'kruiser', hull: '#2e2c3a', deck: '#565466', turret: '#22202c', torp: 4 },
+    { w: 3, name: 'Zware kruiser', hp: 190, speed: 56, accel: 13, turn: 24, turretTurn: 20, reload: 6.2, damage: 20, shellSpeed: 460, range: 780, spread: 1.3, length: 145, width: 31, turrets: 4, barrels: 3, bow: 0.18, style: 'zwaar', hull: '#5a3e2e', deck: '#806450', turret: '#46301f' },
+    { w: 2, name: 'Pantserschip', hp: 240, speed: 46, accel: 11, turn: 20, turretTurn: 16, reload: 6.8, damage: 24, shellSpeed: 460, range: 800, spread: 1.3, length: 140, width: 34, turrets: 3, barrels: 3, bow: 0.25, style: 'zwaar', hull: '#463a34', deck: '#6a5e58', turret: '#342a24' },
+    { w: 2, name: 'Slagkruiser', hp: 260, speed: 62, accel: 14, turn: 22, turretTurn: 18, reload: 6.5, damage: 26, shellSpeed: 480, range: 860, spread: 1.2, length: 160, width: 33, turrets: 4, barrels: 3, bow: 0.12, style: 'zwaar', hull: '#5e2a26', deck: '#84504a', turret: '#481e1a' },
+    // Capital ships (rare)
+    { w: 1.5, name: 'Slagschip', hp: 340, speed: 45, accel: 10, turn: 16, turretTurn: 14, reload: 7.0, damage: 34, shellSpeed: 490, range: 920, spread: 1.1, length: 172, width: 37, turrets: 4, barrels: 3, bow: 0.28, style: 'titan', hull: '#3e2e2a', deck: '#665650', turret: '#2e201c' },
+    { w: 0.8, name: 'Dreadnought', hp: 420, speed: 40, accel: 9, turn: 14, turretTurn: 12, reload: 7.5, damage: 38, shellSpeed: 500, range: 980, spread: 1.0, length: 195, width: 41, turrets: 5, barrels: 3, bow: 0.3, style: 'titan', hull: '#322a28', deck: '#5a504c', turret: '#241c1a' }
 ];
+const ENEMY_WEIGHT = ENEMY_TYPES.reduce((a, t) => a + t.w, 0);
+const ENEMY_TORP_CD = 14;     // seconds between enemy torpedo salvos
 const DEFAULT_DIFF = { enemyHp: 1, enemyDamage: 1, enemyReload: 1, enemySpread: 1, startEnemies: 3, maxEnemies: 8 };
 // Particle kinds: layer 0 = under ships, 1 = under additive, 2 = over, 3 = over additive
 const KIND_LAYER = { foam: 0, glow: 1, smoke: 2, steam: 2, water: 2, sand: 2, debris: 2, ring: 2, fire: 3, flash: 3, spark: 3, repair: 3 };
@@ -41,7 +93,7 @@ const KIND_LAYER = { foam: 0, glow: 1, smoke: 2, steam: 2, water: 2, sand: 2, de
 let canvas, ctx, mini, mctx, dotnet;
 let dpr = 1, vw = 0, vh = 0, zoom = 1;
 let baseZoom = 1, userZoom = 1, zoomTarget = 1, pinchStart = 0, pinchZoom = 1;
-const ZOOM_MIN = 0.35, ZOOM_MAX = 2.5;
+const ZOOM_MIN = 0.65, ZOOM_MAX = 2.5;
 let state = 'start';
 let player = null;
 let diff = DEFAULT_DIFF;
@@ -139,6 +191,7 @@ export function startGame(stats, difficulty) {
     setEngine(player.st);
     cam.x = player.x;
     cam.y = player.y;
+    enemyTargetT = 0;
     for (let i = 0; i < targetEnemies(); i++) spawnEnemy();
     spawnTimer = SPAWN_DELAY;
     setState('playing');
@@ -294,27 +347,31 @@ function chunkIslands(cx, cy) {
     const rng = mulberry32((Math.imul(cx, 73856093) ^ Math.imul(cy, 19349663) ^ seed) | 0);
     const r01 = (a, b) => a + rng() * (b - a);
     list = [];
-    const roll = rng();
-    const count = roll < 0.35 ? 0 : roll < 0.8 ? 1 : 2;
+    // Rare: most chunks are open sea
+    const count = rng() < ISLAND_CHANCE ? 1 : 0;
     for (let n = 0, tries = 0; n < count && tries < 10; tries++) {
-        const r = r01(70, 220), m = r + 140;
+        // Size skewed towards medium, occasionally huge
+        const base = lerp(ISLAND_MIN_R, ISLAND_BASE_MAX_R, Math.pow(rng(), 1.6));
+        // Stretched but with the same area as a round island of radius base
+        const aspect = r01(ISLAND_ASPECT[0], ISLAND_ASPECT[1]), rot = r01(0, Math.PI);
+        const r = base * Math.sqrt(aspect), m = Math.min(r + 160, CHUNK / 2 - 1);
         const x = cx * CHUNK + r01(m, CHUNK - m), y = cy * CHUNK + r01(m, CHUNK - m);
         // Keep the starting area free
-        if (Math.hypot(x, y) < r + 700) continue;
-        if (list.some(i => Math.hypot(i.x - x, i.y - y) < i.r + r + 260)) continue;
-        const pts = [];
-        for (let k = 0; k < 24; k++) pts.push(r * r01(0.86, 1.08));
-        const trees = [];
-        for (let k = 0; k < Math.round(r / 9); k++) {
-            const a = r01(0, 2 * Math.PI), d = r01(0, r * 0.62);
-            trees.push({ x: Math.cos(a) * d, y: Math.sin(a) * d, r: r01(6, 13) });
+        if (Math.hypot(x, y) < r + 1200) continue;
+        // Classic gently irregular coast, stretched into a long island
+        const raw = [];
+        for (let k = 0; k < 24; k++) {
+            const a = k / 24 * 2 * Math.PI;
+            raw.push(r01(0.86, 1.08) / Math.hypot(Math.cos(a - rot), Math.sin(a - rot) * aspect));
         }
-        const rocks = [];
-        for (let k = 0; k < 2 + Math.floor(rng() * 4); k++) {
-            const a = r01(0, 2 * Math.PI), d = r * r01(0.82, 1.0);
-            rocks.push({ x: Math.cos(a) * d, y: Math.sin(a) * d, r: r01(5, 13) });
+        const peak = Math.max(...raw);
+        const pts = raw.map(v => v / peak * r);
+        const isl = { x, y, r, pts, trees: [], rocks: [], sprite: null, phase: r01(0, 6.28) };
+        for (let k = 0; k < 3 + Math.floor(rng() * (r / 60)); k++) {
+            const a = r01(0, 2 * Math.PI), d = coastRadius(isl, a) * r01(0.82, 1.0);
+            isl.rocks.push({ x: Math.cos(a) * d, y: Math.sin(a) * d, r: r01(5, 13) });
         }
-        list.push({ x, y, r, pts, trees, rocks, sprite: null, phase: r01(0, 6.28) });
+        list.push(isl);
         n++;
     }
     chunks.set(key, list);
@@ -340,8 +397,29 @@ function pruneChunks() {
     }
 }
 
+// Coast radius of an island in the direction of a world point
+function coastAt(isl, x, y) {
+    return coastRadius(isl, Math.atan2(y - isl.y, x - isl.x));
+}
+
+// True if (x, y) lies on land (or within pad of the coast)
+function insideIsland(isl, x, y, pad = 0) {
+    const d = Math.hypot(x - isl.x, y - isl.y);
+    return d < isl.r + pad && d < coastAt(isl, x, y) * 0.95 + pad;
+}
+
+// Terrain height at a world point (< 0 = water, 0..0.17 = beach); -1 in open sea
+function terrainHeight(x, y) {
+    let best = -1;
+    for (const isl of islandsNear(x, y, ISLAND_MAX_R + 100)) {
+        if (Math.hypot(x - isl.x, y - isl.y) > isl.r * 1.05) continue;
+        best = Math.max(best, islandHeight(isl, x - isl.x, y - isl.y, islandSeed(isl)));
+    }
+    return best;
+}
+
 function onIsland(x, y, pad = 0) {
-    return islandsNear(x, y, 300 + pad).some(i => Math.hypot(i.x - x, i.y - y) < i.r * 0.95 + pad);
+    return islandsNear(x, y, ISLAND_MAX_R + pad + 100).some(i => insideIsland(i, x, y, pad));
 }
 
 // ---------- setup ----------
@@ -359,12 +437,94 @@ function resize() {
 }
 
 function setZoom(z) {
-    zoomTarget = clamp(z, ZOOM_MIN, ZOOM_MAX);
+    zoomTarget = clamp(z, zoomMin(), ZOOM_MAX);
 }
 
 function setPointer(x, y) {
     mouse.sx = x;
     mouse.sy = y;
+}
+
+// ---------- phone controls: steering wheel, throttle lever, auto-aim ----------
+const WHEEL_MAX = 135;        // wheel degrees for full rudder
+let wheelAngle = 0, autoAim = false, fireHeld = false;
+
+function bindTouchControls() {
+    const wheel = document.getElementById('wheel');
+    if (wheel) {
+        let last = null, id = null;
+        const angleOf = t => {
+            const r = wheel.getBoundingClientRect();
+            return Math.atan2(t.clientY - (r.top + r.height / 2), t.clientX - (r.left + r.width / 2)) / DEG;
+        };
+        wheel.addEventListener('touchstart', e => {
+            e.preventDefault();
+            const t = e.changedTouches[0], r = wheel.getBoundingClientRect();
+            // Tap on the hub: rudder amidships
+            if (Math.hypot(t.clientX - (r.left + r.width / 2), t.clientY - (r.top + r.height / 2)) < r.width * 0.17) { wheelAngle = 0; return; }
+            id = t.identifier;
+            last = angleOf(t);
+        }, { passive: false });
+        wheel.addEventListener('touchmove', e => {
+            e.preventDefault();
+            for (const t of e.changedTouches) {
+                if (t.identifier !== id || last === null) continue;
+                const a = angleOf(t);
+                let d = a - last;
+                if (d > 180) d -= 360;
+                if (d < -180) d += 360;
+                wheelAngle = clamp(wheelAngle + d, -WHEEL_MAX, WHEEL_MAX);
+                last = a;
+            }
+        }, { passive: false });
+        const end = e => { for (const t of e.changedTouches) if (t.identifier === id) { id = null; last = null; } };
+        wheel.addEventListener('touchend', end);
+        wheel.addEventListener('touchcancel', end);
+    }
+
+    const thr = document.getElementById('throttle');
+    if (thr) {
+        // Top = full ahead, 2/3 down = stop, bottom = half astern; snaps to stop
+        const setFrom = t => {
+            const r = thr.getBoundingClientRect();
+            const f = clamp((t.clientY - r.top) / r.height, 0, 1);
+            let v = f <= 2 / 3 ? 1 - f * 1.5 : -(f - 2 / 3) * 1.5;
+            if (Math.abs(v) < 0.06) v = 0;
+            if (player && !player.dead) player.throttle = v;
+        };
+        const on = e => { e.preventDefault(); setFrom(e.targetTouches[0] || e.changedTouches[0]); };
+        thr.addEventListener('touchstart', on, { passive: false });
+        thr.addEventListener('touchmove', on, { passive: false });
+    }
+
+    const auto = document.getElementById('autoBtn');
+    if (auto) {
+        auto.addEventListener('touchstart', e => {
+            e.preventDefault();
+            autoAim = !autoAim;
+            auto.classList.toggle('on', autoAim);
+        }, { passive: false });
+    }
+
+    const fire = document.getElementById('fireBtn');
+    if (fire) {
+        fire.addEventListener('touchstart', e => { e.preventDefault(); fireHeld = true; }, { passive: false });
+        fire.addEventListener('touchend', e => { e.preventDefault(); fireHeld = false; }, { passive: false });
+        fire.addEventListener('touchcancel', () => { fireHeld = false; });
+    }
+}
+
+// Mirrors the current rudder/throttle onto the wheel and lever
+function updateTouchUi() {
+    const rim = document.getElementById('wheelRim');
+    if (rim) rim.style.transform = `rotate(${wheelAngle}deg)`;
+    const knob = document.getElementById('thrKnob');
+    if (knob && player) {
+        const t = player.throttle;
+        knob.style.top = (t >= 0 ? (1 - t) / 1.5 : 2 / 3 + -t / 1.5) * 100 + '%';
+        const lbl = document.getElementById('thrLabel');
+        if (lbl) lbl.textContent = Math.round(t * 100) + '%';
+    }
 }
 
 function bindInput() {
@@ -419,6 +579,8 @@ function bindInput() {
     for (const ev of ['touchstart', 'touchmove', 'touchend', 'touchcancel'])
         canvas.addEventListener(ev, onTouch, { passive: false });
 
+    bindTouchControls();
+
     // On-screen buttons map to keys
     document.querySelectorAll('[data-key]').forEach(b => {
         const k = b.dataset.key;
@@ -453,7 +615,8 @@ function report(force) {
     const sp = !player ? 0 : player.specialT > 0 ? -1 : Math.ceil(player.specialCd);
     // Jets airborne, -1 when the ship carries none
     const air = player && player.st.jets ? jets.filter(j => AIR_PHASES.includes(j.phase)).length : -1;
-    const jetCd = player && player.deck ? Math.ceil(player.deck.sortieCd) : 0;
+    // >0 = rearm seconds left, -1 = waiting for all jets to land
+    const jetCd = player && player.deck ? (player.deck.recovering ? -1 : Math.ceil(player.deck.sortieCd)) : 0;
     const key = `${state}|${kills}|${alive}|${hp}|${rep}|${sp}|${air}|${jetCd}`;
     if (!force && key === lastReport) return;
     lastReport = key;
@@ -461,11 +624,47 @@ function report(force) {
 }
 
 // ---------- ships ----------
+// Applies the long-range gunnery factors once
+function scaleRange(st) {
+    if (st.rangeScaled) return st;
+    // Gunless missile ships (carrier): range is how far the missiles fly
+    if (st.turrets === 0 && st.special === 'missile') return { ...st, range: missileReach(), rangeScaled: true };
+    const f = st.weapon === 'mg' ? MG_RANGE_FACTOR : RANGE_FACTOR;
+    return { ...st, range: st.range * f, shellSpeed: st.shellSpeed * (st.weapon === 'mg' ? 1.2 : SHELL_FACTOR), rangeScaled: true };
+}
+
+// Distance a missile covers in its lifetime (accelerate to max speed, then cruise), minus a margin for turning
+function missileReach() {
+    const tAcc = Math.min(MISSILE.life, (MISSILE.maxSpeed - MISSILE.speed0) / MISSILE.accel);
+    const d = (MISSILE.speed0 + MISSILE.maxSpeed) / 2 * tAcc + MISSILE.maxSpeed * (MISSILE.life - tAcc);
+    return Math.round(d * 0.9);
+}
+
+function hasRadar(st) {
+    if (st.radar !== undefined && st.radar !== null) return !!st.radar;
+    return st.id ? RADAR_SHIPS.has(st.id) : st.length >= 100;
+}
+
+// Despawn range grows when zoomed far out, so spawns stay off-screen
+function despawnDist() {
+    return Math.max(DESPAWN_DIST, Math.hypot(vw / 2 / zoom, vh / 2 / zoom) + 1800);
+}
+
+// Smaller ships cannot zoom out as far
+function zoomMin() {
+    const L = player ? player.st.length : 160;
+    return clamp(ZOOM_MIN * Math.pow(160 / L, 0.8), 0.4, 1.0);
+}
+
 function makeShip(st, x, y, heading, enemy) {
+    st = scaleRange(st);
     // Custom slots are flat [fx, fy, ...] pairs (fractions of length / width)
-    const slots = st.turretSlots && st.turretSlots.length >= 2
-        ? Array.from({ length: st.turretSlots.length / 2 }, (_, i) => [st.turretSlots[i * 2], st.turretSlots[i * 2 + 1]])
+    const pairs = a => Array.from({ length: a.length / 2 }, (_, i) => [a[i * 2], a[i * 2 + 1]]);
+    const slots = st.turrets === 0 ? []
+        : st.turretSlots && st.turretSlots.length >= 2 ? pairs(st.turretSlots)
         : LAYOUTS[clamp(st.turrets || 4, 1, 5)].map(f => [f, 0]);
+    // Missile launch boxes, aimed like turrets
+    const launchers = st.launcherSlots && st.launcherSlots.length >= 2 ? pairs(st.launcherSlots) : [];
     return {
         st, x, y, heading, enemy,
         speed: 0, throttle: 0, rudder: 0,
@@ -478,19 +677,28 @@ function makeShip(st, x, y, heading, enemy) {
             off: f * st.length, side: fy * st.width, rel: fy !== 0 ? Math.sign(fy) * Math.PI / 2 : f > 0 ? 0 : Math.PI,
             reload: rand(0, st.reload), err: 1, recoil: 0, blocked: false
         })),
+        launchers: launchers.map(([f, fy]) => ({ off: f * st.length, side: fy * st.width, rel: fy !== 0 ? Math.sign(fy) * 0.6 : 0, recoil: 0 })),
+        nextLauncher: 0,
         ai: { side: Math.random() < 0.5 ? 1 : -1, flip: rand(8, 16), avoid: 1, stuck: 0, reverse: 0 }
     };
 }
 
-// Fixed enemy count per difficulty; does not grow during play
+// Enemy count wanders randomly between ENEMY_MIN and ENEMY_MAX
+let enemyTarget = 2, enemyTargetT = 0, spawnFront = 0;
 function targetEnemies() {
-    return diff.startEnemies;
+    if (time >= enemyTargetT) {
+        enemyTarget = ENEMY_MIN + Math.floor(Math.random() * (ENEMY_MAX - ENEMY_MIN + 1));
+        enemyTargetT = time + rand(25, 50);
+        spawnFront = rand(0, 2 * Math.PI);
+    }
+    return enemyTarget;
 }
 
 // Fixed class mix and strength; only the chosen difficulty matters
 function enemyStats() {
-    const r = Math.random();
-    const base = ENEMY_TYPES[r < 0.5 ? 0 : r < 0.85 ? 1 : 2];
+    // Weighted pick: small craft common, capital ships rare
+    let r = Math.random() * ENEMY_WEIGHT, base = ENEMY_TYPES[0];
+    for (const t of ENEMY_TYPES) { if ((r -= t.w) <= 0) { base = t; break; } }
     return {
         ...base,
         hp: Math.round(base.hp * diff.enemyHp),
@@ -506,14 +714,36 @@ function turretPos(s, t) {
 }
 
 // Turret scale; carriers use small gun mounts
-const turretWidth = st => st.turretSize || st.width;
+// Turret size relative to the beam; scaled down for a realistic look
+const TURRET_SCALE = 0.72;
+const turretWidth = st => (st.turretSize || st.width) * TURRET_SCALE;
+
+// True if a point (plus margin) lies inside the visible screen area
+function inView(x, y, margin) {
+    return Math.abs(x - cam.x) < vw / 2 / zoom + margin && Math.abs(y - cam.y) < vh / 2 / zoom + margin;
+}
+
+// Only a few enemies attack at once (nearest first, current attackers keep their turn);
+// the rest wait outside gun range
+function assignAttackers() {
+    const alive = enemies.filter(e => !e.dead);
+    const score = e => Math.hypot(e.x - player.x, e.y - player.y) - (e.ai.engaged ? 600 : 0);
+    alive.sort((a, b) => score(a) - score(b));
+    alive.forEach((e, i) => { e.ai.engaged = i < MAX_ATTACKERS; });
+}
 
 function spawnEnemy() {
     const st = enemyStats();
     const px = player ? player.x : 0, py = player ? player.y : 0;
+    // Only outside the screen, never closer than SPAWN_MIN; stays inside despawn range
+    const viewR = Math.hypot(vw / 2 / zoom, vh / 2 / zoom);
+    const rMin = Math.max(SPAWN_MIN + st.length, Math.min(vw, vh) / 2 / zoom);
+    const rMax = Math.min(Math.max(rMin + 600, SPAWN_MAX, viewR + 600), despawnDist() - 300);
     for (let k = 0; k < 80; k++) {
-        const a = rand(0, 2 * Math.PI), r = rand(1300, 2000);
+        // Reinforcements come from one general direction, not from all sides
+        const a = spawnFront + rand(-SPAWN_SPREAD, SPAWN_SPREAD) * DEG, r = rand(rMin, rMax);
         const x = px + Math.cos(a) * r, y = py + Math.sin(a) * r;
+        if (inView(x, y, st.length + 60)) continue;
         if (onIsland(x, y, 200)) continue;
         enemies.push(makeShip(st, x, y, Math.atan2(py - y, px - x), true));
         return;
@@ -528,6 +758,8 @@ function loop(ts) {
     // Keyboard / button zoom, eased toward the target
     if (keys.Equal || keys.NumpadAdd || keys.ZoomIn) setZoom(zoomTarget * (1 + dt * 1.5));
     if (keys.Minus || keys.NumpadSubtract || keys.ZoomOut) setZoom(zoomTarget / (1 + dt * 1.5));
+    // Zoom-out limit follows the current ship size
+    zoomTarget = clamp(zoomTarget, zoomMin(), ZOOM_MAX);
     userZoom += (zoomTarget - userZoom) * Math.min(1, dt * 8);
     zoom = baseZoom * userZoom;
     if (state === 'playing' || state === 'gameover') update(dt);
@@ -539,6 +771,7 @@ function loop(ts) {
     }
     updateEngineSound();
     render();
+    updateTouchUi();
     requestAnimationFrame(loop);
 }
 
@@ -551,6 +784,7 @@ function update(dt) {
         if (active && !player.dead) controlPlayer(dt);
         updateShip(player, dt);
     }
+    if (player) assignAttackers();
     for (const e of enemies) {
         if (!e.dead) {
             if (active && player && !player.dead) enemyAI(e, dt);
@@ -568,7 +802,7 @@ function update(dt) {
 
     if (active && player && !player.dead) {
         // Drop enemies left far behind; reinforcements refill
-        enemies = enemies.filter(e => e.dead || Math.hypot(e.x - player.x, e.y - player.y) < DESPAWN_DIST);
+        enemies = enemies.filter(e => e.dead || Math.hypot(e.x - player.x, e.y - player.y) < despawnDist());
         spawnTimer -= dt;
         if (spawnTimer <= 0 && enemies.filter(e => !e.dead).length < targetEnemies()) {
             spawnEnemy();
@@ -601,13 +835,30 @@ function controlPlayer(dt) {
         player.repairCd = REPAIR_COOLDOWN;
         report(true);
     }
+    const left = keys.KeyA || keys.ArrowLeft, right = keys.KeyD || keys.ArrowRight;
+    // Keys steer directly; otherwise the touch wheel position sets the rudder
+    const rudderTarget = left || right ? (right ? 1 : 0) - (left ? 1 : 0) : wheelAngle / WHEEL_MAX;
+    player.rudder = approach(player.rudder, rudderTarget, dt * 2.5);
+
+    // Auto-aim: lock on the nearest enemy in range, lead the target and keep firing
+    let autoFire = false;
+    if (autoAim && !mouse.down) {
+        const e = nearestEnemy(player.x, player.y, player.st.range);
+        if (e) {
+            const t = Math.hypot(e.x - player.x, e.y - player.y) / (player.st.shellSpeed || 500);
+            mouse.x = e.x + Math.cos(e.heading) * e.speed * t;
+            mouse.y = e.y + Math.sin(e.heading) * e.speed * t;
+            autoFire = true;
+        }
+    }
+
+    // Special weapon aims at the (auto-)aim point
     if ((keys.KeyF || specialQueued) && player.st.special && player.specialCd <= 0) useSpecial(player);
     specialQueued = false;
-    const left = keys.KeyA || keys.ArrowLeft, right = keys.KeyD || keys.ArrowRight;
-    player.rudder = approach(player.rudder, (right ? 1 : 0) - (left ? 1 : 0), dt * 2.5);
 
     aimTurrets(player, mouse.x, mouse.y, dt);
-    if (mouse.down || keys.Space) fireTurrets(player, mouse.x, mouse.y);
+    aimLaunchers(player, mouse.x, mouse.y, dt);
+    if (mouse.down || keys.Space || fireHeld || autoFire) fireTurrets(player, mouse.x, mouse.y);
 }
 
 function useSpecial(s) {
@@ -637,17 +888,60 @@ function useSpecial(s) {
             break;
         }
         case 'missile': {
-            const n = st.specialCount || 2;
+            // Carrier: exactly one missile per single-tube launcher
+            const single = !!st.jets && s.launchers.length > 0;
+            const n = single ? s.launchers.length : (st.specialCount || 2);
             // Lock on to the enemy closest to the cursor
             const target = nearestEnemy(mouse.x, mouse.y, MISSILE.seek * 2);
             for (let i = 0; i < n; i++) {
-                const side = i % 2 ? 1 : -1;
-                const p = local(s, st.length * (0.25 - 0.5 * (i / Math.max(1, n - 1))), side * st.width * 0.2);
-                missiles.push({ x: p.x, y: p.y, a: s.heading + side * rand(1.2, 1.9), speed: MISSILE.speed0, target, life: MISSILE.life, age: -i * 0.12, trail: 0 });
-                addParticle({ kind: 'steam', x: p.x, y: p.y, vx: rand(-20, 20), vy: rand(-20, 20), max: 1.5, size: 8, grow: 18, alpha: 0.6 });
+                // Fired out of the launch tubes in turn
+                const ln = s.launchers.length ? s.launchers[(single ? i : s.nextLauncher++) % s.launchers.length] : null;
+                let p, a;
+                if (ln) {
+                    const lp = turretPos(s, ln);
+                    a = s.heading + ln.rel;
+                    p = { x: lp.x + Math.cos(a) * 7, y: lp.y + Math.sin(a) * 7 };
+                } else {
+                    const side = i % 2 ? 1 : -1;
+                    p = local(s, st.length * (0.25 - 0.5 * (i / Math.max(1, n - 1))), side * st.width * 0.2);
+                    a = s.heading + side * rand(1.2, 1.9);
+                }
+                missiles.push({ x: p.x, y: p.y, a, speed: MISSILE.speed0, target, life: MISSILE.life, age: -i * 0.25, trail: 0, launcher: ln, owner: s });
             }
             break;
         }
+        case 'seekmines': {
+            // Homing mines, dropped in a fan behind the stern
+            const n = st.specialCount || 3;
+            for (let i = 0; i < n; i++) {
+                const p = local(s, -st.length * 0.6 - i * 8, (i - (n - 1) / 2) * 34);
+                mines.push({ x: p.x, y: p.y, arm: MINE.arm, life: SEEKMINE.life, bob: rand(0, 6.28), seek: true });
+                addParticle({ kind: 'ring', x: p.x, y: p.y, vx: 0, vy: 0, max: 1, size: 4, grow: 30, alpha: 0.5 });
+            }
+            while (mines.length > MINE.max) mines.shift();
+            break;
+        }
+        case 'barrage': {
+            // Queue a rocket salvo on the cursor area (clamped to gun range)
+            const d = Math.hypot(mouse.x - s.x, mouse.y - s.y), k = Math.min(1, st.range / Math.max(1, d));
+            s.barrage = { n: st.specialCount || 8, t: 0, x: s.x + (mouse.x - s.x) * k, y: s.y + (mouse.y - s.y) * k };
+            break;
+        }
+        case 'shield':
+            s.specialT = SHIELD.time;
+            break;
+        case 'emp':
+            // Electromagnetic pulse: stuns every enemy in range
+            s.specialT = 1;
+            addParticle({ kind: 'ring', x: s.x, y: s.y, vx: 0, vy: 0, max: 0.9, size: 20, grow: EMP.radius / 0.9, alpha: 0.9 });
+            for (const e of enemies) {
+                if (!e.dead && Math.hypot(e.x - s.x, e.y - s.y) < EMP.radius) e.stunT = EMP.stun;
+            }
+            playSound('ping', s.x, s.y, 3);
+            break;
+        case 'heal':
+            s.specialT = HEAL.time;
+            break;
         case 'overdrive':
             s.specialT = OVERDRIVE.time;
             break;
@@ -669,7 +963,30 @@ function local(s, lx, ly) {
 
 function updateShip(s, dt) {
     const st = s.st;
-    const reloadRate = s.specialT > 0 && st.special === 'overdrive' ? OVERDRIVE.factor : 1;
+    // EMP-stunned ships: no reloading, engines dead
+    s.stunT = Math.max(0, (s.stunT || 0) - dt);
+    const reloadRate = s.stunT > 0 ? 0 : s.specialT > 0 && st.special === 'overdrive' ? OVERDRIVE.factor : 1;
+    if (s.stunT > 0) {
+        s.throttle = 0;
+        if (Math.random() < dt * 12)
+            addParticle({ kind: 'repair', x: s.x + rand(-st.length / 2.5, st.length / 2.5), y: s.y + rand(-st.width / 2, st.width / 2), vx: 0, vy: 0, max: 0.25, size: 2, grow: 10, alpha: 1 });
+    }
+    // Rocket salvo in flight
+    if (s.barrage && s.barrage.n > 0 && !s.dead) {
+        s.barrage.t -= dt;
+        while (s.barrage.t <= 0 && s.barrage.n > 0) {
+            s.barrage.t += BARRAGE.interval;
+            s.barrage.n--;
+            const p = local(s, -st.length * 0.25, rand(-st.width / 4, st.width / 4));
+            const r = Math.sqrt(Math.random()) * BARRAGE.scatter, a0 = rand(0, 2 * Math.PI);
+            const tx = s.barrage.x + Math.cos(a0) * r, ty = s.barrage.y + Math.sin(a0) * r;
+            const a = Math.atan2(ty - p.y, tx - p.x);
+            shells.push({ x: p.x, y: p.y, dx: Math.cos(a), dy: Math.sin(a), speed: BARRAGE.speed, left: Math.hypot(tx - p.x, ty - p.y), enemy: s.enemy, dmg: BARRAGE.damage, done: false });
+            addParticle({ kind: 'flash', x: p.x, y: p.y, vx: 0, vy: 0, max: 0.08, size: 6, grow: 20, alpha: 1 });
+            addParticle({ kind: 'steam', x: p.x, y: p.y, vx: rand(-15, 15), vy: rand(-15, 15), max: rand(1, 1.6), size: 5, grow: 12, alpha: 0.6 });
+            playSound('launch', p.x, p.y, 0.7);
+        }
+    }
     for (const t of s.turrets) {
         t.reload = Math.max(0, t.reload - dt * reloadRate);
         t.recoil = Math.max(0, t.recoil - dt * 3);
@@ -693,6 +1010,17 @@ function updateShip(s, dt) {
         }
         if (st.special === 'overdrive' && Math.random() < dt * 25)
             addParticle({ kind: 'spark', x: s.x + rand(-st.length / 2, st.length / 2), y: s.y + rand(-st.width / 2, st.width / 2), vx: 0, vy: 0, max: 0.3, size: 3, grow: 4, alpha: 1 });
+        // Active armour: glowing points around the hull outline
+        if (st.special === 'shield' && Math.random() < dt * 40) {
+            const a = rand(0, 2 * Math.PI), p = local(s, Math.cos(a) * st.length * 0.58, Math.sin(a) * st.width * 0.9);
+            addParticle({ kind: 'repair', x: p.x, y: p.y, vx: 0, vy: 0, max: 0.35, size: 3, grow: 5, alpha: 0.9 });
+        }
+        // Repair crews: restore HP over time
+        if (st.special === 'heal') {
+            s.hp = Math.min(s.maxHp, s.hp + s.maxHp * HEAL.fraction * dt / HEAL.time);
+            if (Math.random() < dt * 15)
+                addParticle({ kind: 'repair', x: s.x + rand(-st.length / 3, st.length / 3), y: s.y + rand(-st.width / 3, st.width / 3), vx: 0, vy: 0, max: 0.5, size: 3, grow: 6, alpha: 1 });
+        }
     }
 
     if (s.dead) {
@@ -708,7 +1036,7 @@ function updateShip(s, dt) {
             addParticle({ kind: 'foam', x: p.x, y: p.y, vx: 0, vy: 0, max: 2, size: 3, grow: 6, alpha: 0.6 });
         }
     } else {
-        const target = s.throttle * st.speed * (s.throttle < 0 ? 0.5 : 1);
+        const target = s.throttle * st.speed * (s.throttle < 0 ? 0.5 : 1) * (st.hover && s.onLand ? HOVER.land : 1);
         s.speed = approach(s.speed, target, st.accel * dt);
         // Rudder needs water flow: weak at low speed
         const eff = clamp(Math.abs(s.speed) / (st.speed * 0.35), 0.15, 1);
@@ -718,16 +1046,27 @@ function updateShip(s, dt) {
     s.x += Math.cos(s.heading) * s.speed * dt;
     s.y += Math.sin(s.heading) * s.speed * dt;
 
-    for (const isl of islandsNear(s.x, s.y, 400)) {
+    // Hovercraft: can go anywhere on land (beach, grass, through the trees), just slower
+    if (st.hover) {
+        s.onLand = terrainHeight(s.x, s.y) > 0;
+        if (s.onLand && !s.dead && Math.abs(s.speed) > 10 && Math.random() < dt * 25) {
+            const p = local(s, -st.length * 0.45, rand(-st.width / 3, st.width / 3));
+            addParticle({ kind: 'sand', x: p.x, y: p.y, vx: rand(-15, 15), vy: rand(-15, 15), max: 1.2, size: 5, grow: 10, alpha: 0.5 });
+        }
+    }
+
+    for (const isl of st.hover ? [] : islandsNear(s.x, s.y, ISLAND_MAX_R + 300)) {
         const dx = s.x - isl.x, dy = s.y - isl.y, d = Math.hypot(dx, dy) || 1;
-        const min = isl.r * 0.95 + st.length * 0.3;
+        if (d > isl.r + st.length) continue;
+        const coast = coastAt(isl, s.x, s.y) * 0.95;
+        const min = coast + st.length * 0.3;
         if (d < min) {
             s.x = isl.x + dx / d * min;
             s.y = isl.y + dy / d * min;
             // Running aground: damage scales with impact speed
             if (!s.dead && s.groundCd <= 0 && Math.abs(s.speed) > 5) {
                 s.groundCd = GROUND.cooldown;
-                const cx = isl.x + dx / d * isl.r * 0.95, cy = isl.y + dy / d * isl.r * 0.95;
+                const cx = isl.x + dx / d * coast, cy = isl.y + dy / d * coast;
                 burst(cx, cy, 16, 'sand', 70, 1.0, 7);
                 burst(cx, cy, 8, 'spark', 90, 0.35, 3);
                 burst(cx, cy, 6, 'water', 50, 0.8, 6);
@@ -802,19 +1141,25 @@ function insideHull(st, lx, ly) {
     return Math.abs(ly) < w - 3;
 }
 
-// True when the line of fire crosses the own ship beyond the barrel
+// True when the line of fire crosses the own ship beyond the barrel:
+// it may pass over the own deck for a short clearance, but not run along it or re-enter it
 function fireBlocked(s, p, a) {
     const st = s.st, c = Math.cos(s.heading), n = Math.sin(s.heading);
     const dx = Math.cos(a), dy = Math.sin(a);
-    for (let d = turretWidth(st) * 0.75; d < st.length; d += 5) {
+    const clear = Math.max((st.turretSize || st.width) * 0.75, st.width * 0.7);
+    let left = false;
+    for (let d = 0; d < st.length; d += 4) {
         const wx = p.x + dx * d - s.x, wy = p.y + dy * d - s.y;
-        if (insideHull(st, wx * c + wy * n, -wx * n + wy * c)) return true;
+        const inside = insideHull(st, wx * c + wy * n, -wx * n + wy * c);
+        if (!inside) left = true;
+        else if (left || d > clear) return true;
     }
     return false;
 }
 
 function fireTurrets(s, tx, ty) {
     const st = s.st;
+    if (s.stunT > 0) return;
     for (const t of s.turrets) {
         if (t.reload > 0 || t.err > 2 * DEG || t.blocked) continue;
         const p = turretPos(s, t);
@@ -825,6 +1170,12 @@ function fireTurrets(s, tx, ty) {
         const mg = st.weapon === 'mg';
         shells.push({ x: mx, y: my, dx: Math.cos(a), dy: Math.sin(a), speed: st.shellSpeed, left: dist, enemy: s.enemy, dmg: st.damage, done: false, mg });
         t.reload = st.reload * rand(0.95, 1.05);
+        // Machine guns: belt of MG_MAG rounds, then a longer reload
+        if (mg && (t.shots = (t.shots || 0) + 1) >= MG_MAG) {
+            t.shots = 0;
+            t.reload = MG_RELOAD;
+        }
+        t.reloadMax = t.reload;
         t.recoil = mg ? 0.35 : 1;
         if (mg) mgFlash(mx, my, a);
         else muzzleFlash(mx, my, a, tw);
@@ -835,10 +1186,14 @@ function fireTurrets(s, tx, ty) {
 function pathClear(s, h, dist) {
     const dx = Math.cos(h), dy = Math.sin(h);
     const pad = s.st.width + 60;
-    for (const isl of islandsNear(s.x, s.y, dist + 300)) {
+    for (const isl of islandsNear(s.x, s.y, dist + ISLAND_MAX_R + 300)) {
         const cx = isl.x - s.x, cy = isl.y - s.y;
         const t = clamp(cx * dx + cy * dy, 0, dist);
-        if (Math.hypot(dx * t - cx, dy * t - cy) < isl.r + pad) return false;
+        // Quick reject with the bounding circle, then sample along the path against the real coast
+        if (Math.hypot(dx * t - cx, dy * t - cy) >= isl.r + pad) continue;
+        for (let u = 0; u <= dist; u += 40) {
+            if (insideIsland(isl, s.x + dx * u, s.y + dy * u, pad)) return false;
+        }
     }
     return true;
 }
@@ -868,9 +1223,10 @@ function enemyAI(e, dt) {
     e.ai.flip -= dt;
     if (e.ai.flip <= 0) { e.ai.flip = rand(8, 16); e.ai.side *= -1; }
 
-    // Close in, then fight broadside
+    // Engaged ships close in, then fight broadside; the others hang back outside gun range
     let desired;
-    if (d > st.range * 0.85) desired = toP;
+    if (!e.ai.engaged) desired = d < st.range * 1.3 ? toP + Math.PI + e.ai.side * 0.5 : toP + e.ai.side * Math.PI / 2;
+    else if (d > st.range * 0.85 || !inView(e.x, e.y, -40)) desired = toP;   // close in until visible
     else if (d < st.range * 0.45) desired = toP + e.ai.side * Math.PI * 0.7;
     else desired = toP + e.ai.side * Math.PI / 2;
 
@@ -884,13 +1240,15 @@ function enemyAI(e, dt) {
     } else {
         e.rudder = clamp(norm(route.h - e.heading) * 2, -1, 1);
         // Slow down for sharp evasive turns
-        e.throttle = route.blocked && Math.abs(norm(route.h - e.heading)) > 60 * DEG ? 0.5 : 0.85;
+        e.throttle = (route.blocked && Math.abs(norm(route.h - e.heading)) > 60 * DEG ? 0.5 : 0.85) * (e.ai.engaged ? 1 : 0.6);
         e.ai.stuck = Math.abs(e.speed) < 8 ? e.ai.stuck + dt : 0;
         if (e.ai.stuck > 1.5) { e.ai.stuck = 0; e.ai.reverse = 2; }
     }
 
-    // Player hidden in smoke: hold fire
-    if (hidden) return;
+    // Player hidden in smoke, or waiting for a turn to attack: hold fire
+    if (hidden || !e.ai.engaged) return;
+    // Only fire when visible on the player's screen (no shots from off-screen)
+    if (!inView(e.x, e.y, 0)) return;
 
     // Lead the target
     const flight = d / st.shellSpeed;
@@ -898,6 +1256,22 @@ function enemyAI(e, dt) {
     const ty = player.y + Math.sin(player.heading) * player.speed * flight;
     aimTurrets(e, tx, ty, dt);
     if (d < st.range) fireTurrets(e, tx, ty);
+
+    // Torpedo boats: a fan of torpedoes at the player's predicted position now and then
+    if (st.torp && !(e.stunT > 0)) {
+        if (e.torpCd === undefined) e.torpCd = rand(4, 10);
+        e.torpCd -= dt;
+        if (e.torpCd <= 0 && d < TORPEDO.range * 0.85) {
+            e.torpCd = ENEMY_TORP_CD * rand(0.8, 1.2);
+            const tt = d / TORPEDO.speed;
+            const base = Math.atan2(player.y + Math.sin(player.heading) * player.speed * tt - e.y, player.x + Math.cos(player.heading) * player.speed * tt - e.x);
+            for (let i = 0; i < st.torp; i++) {
+                const a = base + (i - (st.torp - 1) / 2) * TORPEDO.spread * DEG;
+                shells.push({ x: e.x, y: e.y, dx: Math.cos(a), dy: Math.sin(a), speed: TORPEDO.speed, left: TORPEDO.range, enemy: true, dmg: TORPEDO.damage * 0.6 * diff.enemyDamage, done: false, torp: true, trail: 0 });
+                addParticle({ kind: 'water', x: e.x + Math.cos(a) * st.width * 0.6, y: e.y + Math.sin(a) * st.width * 0.6, vx: Math.cos(a) * 30, vy: Math.sin(a) * 30, max: 0.6, size: 6, grow: 14, alpha: 0.7 });
+            }
+        }
+    }
 }
 
 function separate() {
@@ -921,7 +1295,7 @@ function separate() {
 function updateShells(dt) {
     for (const sh of shells) {
         let travel = sh.speed * dt;
-        const isl = islandsNear(sh.x, sh.y, travel + 300);
+        const isl = islandsNear(sh.x, sh.y, travel + ISLAND_MAX_R + 100).filter(i => Math.hypot(i.x - sh.x, i.y - sh.y) < i.r + travel + 20);
         if (sh.torp) {
             sh.trail -= dt;
             if (sh.trail <= 0) {
@@ -946,19 +1320,100 @@ function updateShells(dt) {
                 else if (sh.mg) mgHit(sh.x, sh.y, sh.dx, sh.dy);
                 else hitEffect(sh.x, sh.y, sh.dx, sh.dy);
                 sh.done = true;
-            } else if (isl.some(i => Math.hypot(i.x - sh.x, i.y - sh.y) < i.r * 0.95)) {
+            } else if (sh.torp && isl.some(i => insideIsland(i, sh.x, sh.y))) {
+                // Only torpedoes run aground; shells fly over islands
                 burst(sh.x, sh.y, 12, 'sand', 60, 1.0, 6);
                 burst(sh.x, sh.y, 5, 'spark', 80, 0.3, 3);
                 burst(sh.x, sh.y, 4, 'smoke', 20, 1.6, 6);
                 sh.done = true;
             } else if (sh.left <= 0) {
-                if (sh.mg) mgSplash(sh.x, sh.y);
+                if (!sh.torp && onIsland(sh.x, sh.y)) {
+                    // Impact on land
+                    burst(sh.x, sh.y, sh.mg ? 3 : 12, 'sand', 60, 1.0, sh.mg ? 3 : 6);
+                    if (!sh.mg) burst(sh.x, sh.y, 4, 'smoke', 20, 1.6, 6);
+                } else if (sh.mg) mgSplash(sh.x, sh.y);
                 else if (!sh.torp) waterColumn(sh.x, sh.y, 1);
                 sh.done = true;
             }
         }
     }
     shells = shells.filter(s => !s.done);
+}
+
+function anyEnemy() {
+    return enemies.some(e => !e.dead);
+}
+
+// Jets prefer distant ships that no other jet is already attacking
+function pickJetTarget(j, c) {
+    const taken = new Set(jets.filter(o => o !== j && o.target).map(o => o.target));
+    const falling = new Set(bombs.map(b => b.target));   // already doomed by a falling bomb
+    let best = null, bs = -Infinity;
+    for (const e of enemies) {
+        if (e.dead || falling.has(e)) continue;
+        const score = Math.hypot(e.x - c.x, e.y - c.y) - (taken.has(e) ? 5000 : 0);
+        if (score > bs) { bs = score; best = e; }
+    }
+    return best;
+}
+
+function aimLaunchers(s, tx, ty, dt) {
+    for (const ln of s.launchers) {
+        const p = turretPos(s, ln);
+        const want = norm(Math.atan2(ty - p.y, tx - p.x) - s.heading);
+        ln.rel = norm(ln.rel + clamp(norm(want - ln.rel), -2.5 * dt, 2.5 * dt));
+        ln.recoil = Math.max(0, ln.recoil - dt * 2);
+    }
+}
+
+// Box launcher with four tubes; loaded tubes show red nose caps
+function drawLaunchers(s) {
+    if (!s.launchers.length) return;
+    const ready = !s.st.special || s.specialCd <= 0;
+    for (const ln of s.launchers) {
+        const p = turretPos(s, ln);
+        ctx.save();
+        if (s.dead) ctx.globalAlpha = clamp(1 - s.sink / 3.5, 0, 1);
+        ctx.translate(p.x, p.y);
+        // Mount ring
+        ctx.fillStyle = '#2a2e32';
+        ctx.beginPath();
+        ctx.arc(0, 0, 5.5, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.rotate(s.heading + ln.rel);
+        ctx.translate(-ln.recoil * 1.5, 0);
+        setShadow(3, 3);
+        const g = ctx.createLinearGradient(0, -5, 0, 5);
+        g.addColorStop(0, '#9aa2a8');
+        g.addColorStop(0.5, '#6c747a');
+        g.addColorStop(1, '#41474c');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        const single = !!s.st.jets;
+        if (single) ctx.roundRect(-6, -3, 13, 6, 1.5);
+        else ctx.roundRect(-6, -5, 13, 10, 1.5);
+        ctx.fill();
+        clearShadow();
+        ctx.strokeStyle = 'rgba(0,0,0,.5)';
+        ctx.lineWidth = 0.6;
+        ctx.stroke();
+        // Tube mouths on the front face (carrier: one tube per launcher)
+        const tubes = single ? [[0, 0]] : [[-2.5, 0], [-2.5, 1], [2.5, 0], [2.5, 1]];
+        for (const [ty, tz] of tubes) {
+            const x = 7 - tz * 0.01, y = ty;
+            ctx.fillStyle = '#111';
+            ctx.beginPath();
+            ctx.arc(x - 1 - tz * 2.6, y, 1.6, 0, 2 * Math.PI);
+            ctx.fill();
+            if (ready) {
+                ctx.fillStyle = '#b8282a';
+                ctx.beginPath();
+                ctx.arc(x - 1 - tz * 2.6, y, 0.9, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        }
+        ctx.restore();
+    }
 }
 
 function nearestEnemy(x, y, maxDist) {
@@ -974,8 +1429,24 @@ function nearestEnemy(x, y, maxDist) {
 // Homing missiles: short launch boost, then accelerate and steer to the target
 function updateMissiles(dt) {
     for (const m of missiles) {
+        const wasWaiting = m.age < 0;
+        // Until it fires, a queued missile sits in its tube and moves/turns with the launcher
+        if (wasWaiting && m.launcher && m.owner) {
+            const lp = turretPos(m.owner, m.launcher);
+            m.a = m.owner.heading + m.launcher.rel;
+            m.x = lp.x + Math.cos(m.a) * 7;
+            m.y = lp.y + Math.sin(m.a) * 7;
+        }
         m.age += dt;
         if (m.age < 0) continue;           // staggered salvo
+        if (wasWaiting || !m.fired) {
+            m.fired = true;
+            if (m.launcher) m.launcher.recoil = 1;
+            addParticle({ kind: 'flash', x: m.x, y: m.y, vx: 0, vy: 0, max: 0.1, size: 8, grow: 30, alpha: 1 });
+            for (let k = 0; k < 6; k++)
+                addParticle({ kind: 'steam', x: m.x, y: m.y, vx: -Math.cos(m.a) * rand(20, 60) + rand(-15, 15), vy: -Math.sin(m.a) * rand(20, 60) + rand(-15, 15), max: rand(1.2, 2), size: 5, grow: 14, alpha: 0.6 });
+            playSound('launch', m.x, m.y, 1);
+        }
         m.life -= dt;
         if (!m.target || m.target.dead) m.target = nearestEnemy(m.x, m.y, MISSILE.seek);
         if (m.age > MISSILE.boost) {
@@ -1002,11 +1473,8 @@ function updateMissiles(dt) {
                 damage(hit, MISSILE.damage);
                 explosion(m.x, m.y, true);
                 m.done = true;
-            } else if (onIsland(m.x, m.y)) {
-                explosion(m.x, m.y, false);
-                burst(m.x, m.y, 10, 'sand', 60, 1, 6);
-                m.done = true;
             }
+            // Missiles fly over islands
         }
         if (!m.done && m.life <= 0) {
             explosion(m.x, m.y, false);
@@ -1027,7 +1495,7 @@ const SPOTS = [
     [0.09, 0.32], [0.15, 0.32], [0.21, 0.32], [0.27, 0.32], [0.33, 0.32], [0.39, 0.32],
     [0.18, -0.34], [0.24, -0.34], [0.30, -0.34], [0.36, -0.34]
 ];
-const DECK_PHASES = ['parked', 'taxiOut', 'cat', 'trap', 'taxiIn'];
+const DECK_PHASES = ['parked', 'taxiOut', 'cat', 'trap', 'taxiIn', 'park'];
 const AIR_PHASES = ['air', 'hold', 'approach', 'final'];
 
 // Parked pose: nose angled inboard and forward
@@ -1040,10 +1508,10 @@ function spotPose(st, i) {
 function initCarrier(c) {
     jets = jets.filter(j => AIR_PHASES.includes(j.phase));
     if (!c.st.jets) { c.deck = null; return; }
-    c.deck = { sortieCd: 0, sinceLaunch: JET.launchInterval, cat: [null, null], laneOwner: null };
+    c.deck = { sortieCd: 0, recovering: false, sinceLaunch: JET.launchInterval, cat: [null, null], laneOwner: null, approachOwner: null };
     for (let i = 0; i < c.st.jets; i++) {
         const p = spotPose(c.st, i);
-        const j = { spot: i, phase: 'parked', lx: p.x, ly: p.y, la: p.a, sortied: false, alt: 0, bomb: true, speed: 0, trail: 0, ttl: 8, x: 0, y: 0, a: 0 };
+        const j = { spot: i, phase: 'parked', lx: p.x, ly: p.y, la: p.a, sortied: false, alt: 0, bomb: JET.bombs, speed: 0, trail: 0, ttl: 8, x: 0, y: 0, a: 0 };
         placeOnDeck(c, j);
         jets.push(j);
     }
@@ -1100,13 +1568,18 @@ function updateJets(dt) {
         const L = c.st.length, W = c.st.width;
         deck.sinceLaunch += dt;
         // Turnaround pause after all jets flew one sortie
+        // After every jet flew: wait until all have landed and parked, then rearm for a minute
+        if (deck.recovering && jets.every(j => j.phase === 'parked')) {
+            deck.recovering = false;
+            deck.sortieCd = JET.sortieCooldown;
+        }
         if (deck.sortieCd > 0) {
             deck.sortieCd -= dt;
-            if (deck.sortieCd <= 0) for (const j of jets) j.sortied = false;
+            if (deck.sortieCd <= 0) for (const j of jets) { j.sortied = false; j.bomb = JET.bombs; }
         }
         // Send the closest fresh jet to a free catapult
-        const near = state === 'playing' && nearestEnemy(c.x, c.y, JET.range);
-        if (near && deck.sortieCd <= 0) {
+        const near = state === 'playing' && anyEnemy();
+        if (near && deck.sortieCd <= 0 && !deck.recovering) {
             for (let k = 0; k < CATAPULTS.length; k++) {
                 if (deck.cat[k]) continue;
                 const cp = CATAPULTS[k], sx = cp.x0 * L, sy = cp.y * W;
@@ -1137,7 +1610,8 @@ function updateJets(dt) {
 
         // Airborne
         const finalSpeed = JET.landSpeed + Math.max(0, c ? c.speed : 0);
-        j.speed = approach(j.speed, j.phase === 'final' ? finalSpeed : JET.speed, JET.accel * dt);
+        // Pattern speed while approaching and on final, so the jet can turn onto the landing line
+        j.speed = approach(j.speed, j.phase === 'final' || j.phase === 'approach' ? finalSpeed : JET.speed, JET.accel * dt);
         if (j.phase !== 'final') j.alt = Math.min(1, j.alt + dt * 0.45);
 
         if (!deck) {
@@ -1146,34 +1620,53 @@ function updateJets(dt) {
             if (j.ttl <= 0) j.done = true;
             steerJet(j, j.x + Math.cos(j.a) * 100, j.y + Math.sin(j.a) * 100, dt);
         } else if (j.phase === 'air') {
-            if (!j.target || j.target.dead) j.target = j.bomb ? nearestEnemy(j.x, j.y, JET.range * 1.5) : null;
-            if (!j.target) {
+            if (!j.target || j.target.dead) j.target = j.bomb > 0 ? pickJetTarget(j, c) : null;
+            if (!j.target && j.bomb > 0 && anyEnemy()) {
+                // Bombs left but every ship is already being bombed: loiter over the enemy, not the carrier
+                const e = nearestEnemy(j.x, j.y, Infinity);
+                const ang = Math.atan2(j.y - e.y, j.x - e.x) + 0.6;
+                steerJet(j, e.x + Math.cos(ang) * 350, e.y + Math.sin(ang) * 350, dt);
+            } else if (!j.target) {
                 j.phase = 'hold';
                 j.holdSince = time;
             } else {
                 const t = j.target;
                 const tx = t.x + Math.cos(t.heading) * t.speed * JET.bombFall;
                 const ty = t.y + Math.sin(t.heading) * t.speed * JET.bombFall;
-                if (j.alt > 0.8 && j.bomb && Math.hypot(t.x - j.x, t.y - j.y) < JET.dropDist) {
-                    bombs.push({ sx: j.x, sy: j.y, tx, ty, t: 0 });
-                    j.bomb = false;
-                    j.target = null;
+                if (j.alt > 0.8 && j.bomb > 0 && Math.hypot(t.x - j.x, t.y - j.y) < JET.dropDist) {
+                    bombs.push({ sx: j.x, sy: j.y, tx, ty, t: 0, target: t });
+                    j.bomb--;
+                    j.target = null;   // next bomb goes to another ship
                 }
                 steerJet(j, tx, ty, dt);
             }
+        } else if (j.phase === 'hold' && j.bomb > 0 && anyEnemy()) {
+            // New enemies while waiting to land: go back out and use the remaining bombs
+            j.phase = 'air';
+            j.target = null;
         } else if (j.phase === 'hold') {
             // Orbit the carrier until the landing lane is free and it is our turn
             const ang = Math.atan2(j.y - c.y, j.x - c.x) + 0.6;
             steerJet(j, c.x + Math.cos(ang) * JET.holdRadius, c.y + Math.sin(ang) * JET.holdRadius, dt);
-            if (!deck.laneOwner) {
+            // Next in line may start its approach while the previous jet is still landing
+            if (!deck.approachOwner) {
                 const first = jets.filter(o => o.phase === 'hold').sort((a, b) => a.holdSince - b.holdSince)[0];
-                if (first === j) { deck.laneOwner = j; j.phase = 'approach'; }
+                if (first === j) { deck.approachOwner = j; j.phase = 'approach'; }
             }
         } else {
             const li = laneInfo(c);
             if (j.phase === 'approach') {
-                if (Math.hypot(li.ap.x - j.x, li.ap.y - j.y) < 80) j.phase = 'final';
-                steerJet(j, li.ap.x, li.ap.y, dt);
+                if (Math.hypot(li.ap.x - j.x, li.ap.y - j.y) < 150) {
+                    // Only one jet on final / on the landing deck at a time
+                    if (!deck.laneOwner || deck.laneOwner === j) {
+                        deck.laneOwner = j;
+                        if (deck.approachOwner === j) deck.approachOwner = null;
+                        j.phase = 'final';
+                    } else {
+                        const ang = Math.atan2(j.y - li.ap.y, j.x - li.ap.x) + 0.8;
+                        steerJet(j, li.ap.x + Math.cos(ang) * 160, li.ap.y + Math.sin(ang) * 160, dt);
+                    }
+                } else steerJet(j, li.ap.x, li.ap.y, dt);
             } else {
                 // Final: line up and descend onto the angled deck
                 const d = Math.hypot(li.td.x - j.x, li.td.y - j.y);
@@ -1204,9 +1697,17 @@ function updateJets(dt) {
     for (const b of bombs) {
         b.t += dt;
         if (b.t < JET.bombFall) continue;
-        const hit = hitShip({ x: b.tx, y: b.ty, enemy: false });
+        // Generous hit test around the aimed ship; a bomb sinks any ship outright
+        let hit = null;
+        const t = b.target;
+        if (t && !t.dead) {
+            const dx = b.tx - t.x, dy = b.ty - t.y, c2 = Math.cos(t.heading), n2 = Math.sin(t.heading);
+            const lx = (dx * c2 + dy * n2) / (t.st.length * 0.75), ly = (-dx * n2 + dy * c2) / (t.st.width * 1.2);
+            if (lx * lx + ly * ly <= 1) hit = t;
+        }
+        hit = hit || hitShip({ x: b.tx, y: b.ty, enemy: false });
         if (hit) {
-            damage(hit, JET.bombDmg);
+            damage(hit, hit.hp + 1);
             explosion(b.tx, b.ty, false);
             burst(b.tx, b.ty, 4, 'fire', 30, 0.8, 7);
         } else {
@@ -1225,7 +1726,7 @@ function updateDeckJet(c, deck, j, dt) {
             break;
         case 'cat': {
             const cp = CATAPULTS[j.cat];
-            const enemyNear = state === 'playing' && nearestEnemy(c.x, c.y, JET.range * 1.5);
+            const enemyNear = state === 'playing' && anyEnemy();
             if (j.deckV === 0) {
                 // Tensioned on the shuttle, steam venting; fires at most once per interval
                 j.hold -= dt;
@@ -1238,7 +1739,7 @@ function updateDeckJet(c, deck, j, dt) {
                     j.deckV = 1;
                     playSound('jet', j.x, j.y, 1);
                     j.sortied = true;
-                    if (jets.every(o => o.sortied || AIR_PHASES.includes(o.phase) && o.sortied)) deck.sortieCd = JET.sortieCooldown;
+                    if (jets.every(o => o.sortied)) deck.recovering = true;
                 }
             } else {
                 j.deckV += JET.catAccel * dt;
@@ -1277,12 +1778,17 @@ function updateDeckJet(c, deck, j, dt) {
         case 'taxiIn':
             if (taxi(j, dt)) {
                 if (deck.laneOwner === j) deck.laneOwner = null;
-                j.phase = 'parked';
-                j.la = spotPose(c.st, j.spot).a;
-                j.bomb = true;   // rearmed
+                j.phase = 'park';
                 j.onWaypoint = null;
             }
             break;
+        case 'park': {
+            // Pivot slowly into the parking orientation
+            const want = spotPose(c.st, j.spot).a, d = norm(want - j.la);
+            j.la = norm(j.la + clamp(d, -JET.taxiTurn * 0.5 * dt, JET.taxiTurn * 0.5 * dt));
+            if (Math.abs(d) < 0.01) { j.la = want; j.phase = 'parked'; }
+            break;
+        }
     }
 }
 
@@ -1361,10 +1867,12 @@ function drawJets() {
         const burner = AIR_PHASES.includes(j.phase) || (j.phase === 'cat' && j.deckV > 0);
         drawJetBody(scale, burner);
         // Bomb under the fuselage until released
-        if (j.bomb) {
-            ctx.fillStyle = '#2a2d30';
+        // Remaining bombs: one under the fuselage, the rest under the wings
+        ctx.fillStyle = '#2a2d30';
+        const slots = [[-2, 0], [-3, -4], [-3, 4], [-4, -7], [-4, 7]];
+        for (let k = 0; k < Math.min(j.bomb || 0, slots.length); k++) {
             ctx.beginPath();
-            ctx.ellipse(-2, 0, 3, 1, 0, 0, 2 * Math.PI);
+            ctx.ellipse(slots[k][0], slots[k][1], 2.6, 0.9, 0, 0, 2 * Math.PI);
             ctx.fill();
         }
         ctx.restore();
@@ -1422,6 +1930,15 @@ function updateMines(dt) {
         m.arm -= dt;
         m.life -= dt;
         if (m.arm > 0 || m.life <= 0) continue;
+        // Homing mines drift towards the nearest enemy in range
+        if (m.seek) {
+            const e = nearestEnemy(m.x, m.y, SEEKMINE.range);
+            if (e) {
+                const d = Math.hypot(e.x - m.x, e.y - m.y) || 1;
+                m.x += (e.x - m.x) / d * SEEKMINE.speed * dt;
+                m.y += (e.y - m.y) / d * SEEKMINE.speed * dt;
+            }
+        }
         for (const e of enemies) {
             if (e.dead) continue;
             if (Math.hypot(e.x - m.x, e.y - m.y) < e.st.length * 0.35 + 20) {
@@ -1451,6 +1968,8 @@ function hitShip(sh) {
 
 // byPlayer = false for self-inflicted damage (no coins)
 function damage(s, dmg, byPlayer = true) {
+    // Active armour absorbs most of the damage
+    if (s.st.special === 'shield' && s.specialT > 0) dmg *= 1 - SHIELD.reduce;
     s.hp -= dmg;
     if (s.hp <= 0 && !s.dead) {
         s.hp = 0;
@@ -1608,8 +2127,13 @@ function initAudio() {
     const noise = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
     const d = noise.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    // Brown noise (integrated white) for deep rumbles and water
+    const brown = ac.createBuffer(1, ac.sampleRate * 4, ac.sampleRate);
+    const bd = brown.getChannelData(0);
+    let lastB = 0;
+    for (let i = 0; i < bd.length; i++) { lastB = (lastB + 0.02 * (Math.random() * 2 - 1)) / 1.02; bd[i] = lastB * 3.5; }
 
-    audio = { ctx: ac, master, noise, eng: null, engKey: '', last: {} };
+    audio = { ctx: ac, master, noise, brown, eng: null, engKey: '', last: {} };
     if (player) setEngine(player.st);
 }
 
@@ -1618,27 +2142,31 @@ function setMuted(m) {
     if (audio) audio.master.gain.setTargetAtTime(m ? 0 : 0.7, audio.ctx.currentTime, 0.05);
 }
 
-// Engine sound profiles: oscillator types, rpm range, filter, rumble, chug (am) and turbine whine
+// Engine sound profiles, mostly noise-based (real ships sound like rushing water and machinery, not tones)
+// tone: [type, f0, f1, cut0, cut1, mix] quiet harmonic body; pulse: [freq, Q, mix] machinery noise band;
+// am: [hz0, hz1, depth] firing-rate chug on the pulse band; rumble: [lowpass, mix] brown-noise hull rumble;
+// wash: [freq, mix] bow wave/wake, scales with speed; whine: [f0, f1, gain] turbine; wind: [freq, Q, mix] wind over deck
 const ENGINE_PROFILES = {
-    // Small fast boats: buzzy high-revving engines
-    boat: { t1: 'sawtooth', t2: 'square', ratio: 1.5, f0: 55, f1: 150, cut0: 600, cut1: 2200, noiseF: 900, noiseMix: 0.3, am: [12, 30, 0.35], turb: null, vol: 0.75 },
-    // Frigates: medium diesels
-    diesel: { t1: 'sawtooth', t2: 'square', ratio: 2.02, f0: 32, f1: 62, cut0: 180, cut1: 700, noiseF: 150, noiseMix: 0.8, am: [5, 10, 0.25], turb: null, vol: 1 },
-    // Cruisers: gas turbines with a high whine
-    turbine: { t1: 'sawtooth', t2: 'triangle', ratio: 2, f0: 30, f1: 55, cut0: 200, cut1: 800, noiseF: 400, noiseMix: 0.7, am: null, turb: [700, 1500, 0.05], vol: 0.9 },
-    // Heavy cruisers: deep chugging diesels
-    heavy: { t1: 'sawtooth', t2: 'square', ratio: 2.01, f0: 24, f1: 44, cut0: 140, cut1: 450, noiseF: 110, noiseMix: 1.0, am: [3, 6, 0.4], turb: null, vol: 1.1 },
-    // Battleships: huge steam turbines
-    battleship: { t1: 'sawtooth', t2: 'sine', ratio: 1.5, f0: 20, f1: 34, cut0: 110, cut1: 320, noiseF: 80, noiseMix: 1.2, am: [1.5, 3, 0.2], turb: [300, 520, 0.03], vol: 1.2 },
-    // Carrier: massive low rumble plus constant ventilation hum
-    carrier: { t1: 'sine', t2: 'sawtooth', ratio: 3, f0: 18, f1: 28, cut0: 90, cut1: 240, noiseF: 70, noiseMix: 1.4, am: null, turb: [60, 62, 0.05], vol: 1.25 }
+    // Small fast boats: high-revving engine bark and loud bow spray
+    boat: { tone: ['sawtooth', 45, 120, 300, 1400, 0.16], pulse: [650, 0.8, 0.55], am: [12, 32, 0.8], rumble: [130, 0.35], wash: [1500, 1.0], whine: null, wind: null, vol: 0.8 },
+    // Frigates: medium-speed diesels, clear chug
+    diesel: { tone: ['sawtooth', 28, 55, 150, 500, 0.14], pulse: [220, 0.9, 0.8], am: [5, 11, 0.85], rumble: [90, 0.6], wash: [900, 0.75], whine: null, wind: null, vol: 1 },
+    // Cruisers: gas turbines, jet-like roar with a faint whine
+    turbine: { tone: ['triangle', 30, 55, 150, 450, 0.07], pulse: [1800, 0.6, 0.45], am: null, rumble: [80, 0.6], wash: [950, 0.75], whine: [900, 2200, 0.02], wind: null, vol: 0.9 },
+    // Heavy cruisers: slow, deep diesel thumping
+    heavy: { tone: ['sawtooth', 22, 40, 120, 350, 0.14], pulse: [160, 0.9, 0.9], am: [3, 6.5, 0.85], rumble: [70, 0.8], wash: [700, 0.85], whine: null, wind: null, vol: 1.1 },
+    // Battleships: steam turbines, hiss and deep rumble
+    battleship: { tone: ['sine', 20, 32, 100, 250, 0.12], pulse: [500, 0.5, 0.35], am: null, rumble: [60, 1.0], wash: [600, 0.95], whine: [320, 560, 0.012], wind: null, vol: 1.2 },
+    // Carrier: broadband rush — low-frequency hull rumble, ventilation and wind across the flight deck
+    carrier: { tone: null, pulse: [250, 0.7, 0.45], am: null, rumble: [110, 1.2], wash: [550, 1.0], whine: null, wind: [700, 0.5, 0.55], vol: 1.25 }
 };
 const ENGINE_BY_SHIP = {
     korvet: 'boat', jager: 'boat', wesp: 'boat', horzel: 'boat', specht: 'boat',
     fregat: 'diesel', spin: 'diesel', schim: 'diesel',
     kruiser: 'turbine', valk: 'turbine', orka: 'turbine', arend: 'turbine',
     monitor: 'heavy', zwaar: 'heavy', furie: 'heavy', zeus: 'heavy',
-    titan: 'battleship', leviathan: 'battleship', poseidon: 'carrier'
+    titan: 'battleship', leviathan: 'battleship', poseidon: 'carrier',
+    zwaluw: 'turbine', storm: 'turbine', tornado: 'turbine'
 };
 
 function engineKey(st) {
@@ -1661,54 +2189,71 @@ function setEngine(st) {
     const out = ac.createGain();
     out.gain.value = 0;
     out.connect(audio.master);
-    // Chug: amplitude modulation of the engine body
-    const body = ac.createGain();
-    body.gain.value = 1;
-    const filter = ac.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = pr.cut0;
-    filter.Q.value = 0.9;
-    filter.connect(body);
-    body.connect(out);
-    const o1 = ac.createOscillator(), o2 = ac.createOscillator();
-    o1.type = pr.t1; o2.type = pr.t2;
-    o1.frequency.value = pr.f0; o2.frequency.value = pr.f0 * pr.ratio;
-    const o2g = ac.createGain();
-    o2g.gain.value = 0.35;
-    o1.connect(filter); o2.connect(o2g); o2g.connect(filter);
-    const rumble = ac.createBufferSource();
-    rumble.buffer = audio.noise;
-    rumble.loop = true;
-    const rf = ac.createBiquadFilter();
-    rf.type = 'bandpass';
-    rf.frequency.value = pr.noiseF;
-    rf.Q.value = 0.7;
-    const rg = ac.createGain();
-    rg.gain.value = pr.noiseMix;
-    rumble.connect(rf); rf.connect(rg); rg.connect(filter);
-    const nodes = [o1, o2, rumble];
-    let lfo = null, lfoG = null;
-    if (pr.am) {
-        lfo = ac.createOscillator();
-        lfo.frequency.value = pr.am[0];
-        lfoG = ac.createGain();
-        lfoG.gain.value = pr.am[2];
-        lfo.connect(lfoG); lfoG.connect(body.gain);
-        body.gain.value = 1 - pr.am[2] * 0.5;
-        nodes.push(lfo);
+    const nodes = [];
+    const loopNoise = buf => { const s = ac.createBufferSource(); s.buffer = buf; s.loop = true; s.playbackRate.value = rand(0.9, 1.1); nodes.push(s); return s; };
+    const filt = (type, f, q) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; };
+    const gain = v => { const g = ac.createGain(); g.gain.value = v; return g; };
+    const lfoTo = (param, f, depth) => { const o = ac.createOscillator(); o.frequency.value = f; const g = gain(depth); o.connect(g); g.connect(param); nodes.push(o); return o; };
+    const e = { pr, out, nodes };
+    // Quiet harmonic engine body
+    if (pr.tone) {
+        e.o1 = ac.createOscillator();
+        e.o1.type = pr.tone[0];
+        e.o1.frequency.value = pr.tone[1];
+        e.toneF = filt('lowpass', pr.tone[3], 0.7);
+        e.o1.connect(e.toneF);
+        e.toneF.connect(gain(pr.tone[5])).connect(out);
+        nodes.push(e.o1);
     }
-    let turb = null, turbG = null;
-    if (pr.turb) {
-        turb = ac.createOscillator();
-        turb.type = 'sine';
-        turb.frequency.value = pr.turb[0];
-        turbG = ac.createGain();
-        turbG.gain.value = pr.turb[2];
-        turb.connect(turbG); turbG.connect(out);
-        nodes.push(turb);
+    // Machinery noise band, pulsed at firing rate for diesels
+    {
+        const [f, q, mix] = pr.pulse;
+        e.pulseBase = f;
+        e.pulseF = filt('bandpass', f, q);
+        const g = gain(pr.am ? mix * (1 - pr.am[2] * 0.5) : mix);
+        loopNoise(audio.noise).connect(e.pulseF);
+        e.pulseF.connect(g);
+        g.connect(out);
+        if (pr.am) e.lfo = lfoTo(g.gain, pr.am[0], mix * pr.am[2] * 0.5);
+    }
+    // Deep hull rumble
+    {
+        const lp = filt('lowpass', pr.rumble[0], 0.5);
+        loopNoise(audio.brown).connect(lp);
+        lp.connect(gain(pr.rumble[1])).connect(out);
+    }
+    // Bow wave and wake: water rush that grows with speed, with a slow swell
+    {
+        e.washF = filt('bandpass', pr.wash[0], 0.5);
+        e.washG = gain(0);
+        loopNoise(audio.noise).connect(e.washF);
+        e.washF.connect(e.washG);
+        const sw = gain(1);
+        e.washG.connect(sw);
+        sw.connect(out);
+        lfoTo(sw.gain, 0.17, 0.25);
+    }
+    // Wind gusting across a large flat deck
+    if (pr.wind) {
+        const bp = filt('bandpass', pr.wind[0], pr.wind[1]);
+        e.windG = gain(pr.wind[2] * 0.5);
+        loopNoise(audio.noise).connect(bp);
+        bp.connect(e.windG);
+        const sw = gain(1);
+        e.windG.connect(sw);
+        sw.connect(out);
+        lfoTo(sw.gain, 0.11, 0.35);
+    }
+    // Turbine whine
+    if (pr.whine) {
+        e.turb = ac.createOscillator();
+        e.turb.type = 'sine';
+        e.turb.frequency.value = pr.whine[0];
+        e.turb.connect(gain(pr.whine[2])).connect(out);
+        nodes.push(e.turb);
     }
     nodes.forEach(n => n.start());
-    audio.eng = { pr, out, filter, o1, o2, lfo, turb, nodes };
+    audio.eng = e;
     audio.engKey = key;
 }
 
@@ -1720,13 +2265,18 @@ function updateEngineSound() {
     const frac = on ? clamp(Math.abs(player.speed) / player.st.speed, 0, 1) : 0;
     const thr = on ? Math.abs(player.throttle) : 0;
     const rpm = clamp(frac * 0.8 + thr * 0.2, 0, 1);
-    const f = lerp(pr.f0, pr.f1, rpm);
-    e.o1.frequency.setTargetAtTime(f, t, 0.25);
-    e.o2.frequency.setTargetAtTime(f * pr.ratio, t, 0.25);
-    e.filter.frequency.setTargetAtTime(lerp(pr.cut0, pr.cut1, rpm), t, 0.25);
+    if (e.o1) {
+        e.o1.frequency.setTargetAtTime(lerp(pr.tone[1], pr.tone[2], rpm), t, 0.25);
+        e.toneF.frequency.setTargetAtTime(lerp(pr.tone[3], pr.tone[4], rpm), t, 0.25);
+    }
+    e.pulseF.frequency.setTargetAtTime(e.pulseBase * (0.8 + rpm * 0.6), t, 0.3);
     if (e.lfo) e.lfo.frequency.setTargetAtTime(lerp(pr.am[0], pr.am[1], rpm), t, 0.3);
-    if (e.turb) e.turb.frequency.setTargetAtTime(lerp(pr.turb[0], pr.turb[1], rpm), t, 0.4);
-    e.out.gain.setTargetAtTime(on ? (0.07 + rpm * 0.17) * pr.vol : 0, t, 0.3);
+    if (e.turb) e.turb.frequency.setTargetAtTime(lerp(pr.whine[0], pr.whine[1], rpm), t, 0.4);
+    // Water noise follows actual speed through the water
+    e.washG.gain.setTargetAtTime(pr.wash[1] * Math.pow(frac, 1.3) * 1.4, t, 0.4);
+    e.washF.frequency.setTargetAtTime(pr.wash[0] * (0.7 + frac * 0.6), t, 0.4);
+    if (e.windG) e.windG.gain.setTargetAtTime(pr.wind[2] * (0.4 + frac * 0.8), t, 0.5);
+    e.out.gain.setTargetAtTime(on ? (0.05 + rpm * 0.09) * pr.vol : 0, t, 0.3);
 }
 
 // Distance attenuation and stereo pan relative to the camera
@@ -1743,53 +2293,114 @@ function playSound(kind, x, y, size = 1) {
     // Rate limit per kind to avoid stacking dozens of identical sounds
     if (audio.last[kind] && t - audio.last[kind] < (kind === 'mg' ? 0.045 : 0.035)) return;
     audio.last[kind] = t;
-    const cfg = {
-        boom: { range: 3200, dur: 1.4 * size, f0: 1400, f1: 60, gain: 1.1, thump: 55 },
-        // Small guns crack, big guns boom
-        cannon: { range: 2400, dur: 0.2 + 0.35 * size, f0: 4200 / size, f1: 160 / size, gain: 0.55, thump: 120 / size },
-        jet: { range: 2600, dur: 1.8, f0: 600, f1: 3500, gain: 0.35, thump: 0, rise: true },
-        mg: { range: 2000, dur: 0.07, f0: 6000, f1: 1200, gain: 0.3, thump: 140 },
-        ping: { range: 1800, dur: 0.06, f0: 7000, f1: 3000, gain: 0.12, thump: 0 },
-        hit: { range: 2600, dur: 0.5, f0: 3000, f1: 200, gain: 0.6, thump: 0 },
-        splash: { range: 2000, dur: 0.7, f0: 2400, f1: 500, gain: 0.25, thump: 0 }
-    }[kind];
-    const sp = spatial(x, y, cfg.range);
-    const vol = sp.vol * cfg.gain * (kind === 'cannon' ? Math.min(size, 1.3) : size);
+    const range = { boom: 3400, cannon: 2600, launch: 2400, jet: 2600, mg: 2000, ping: 1800, hit: 2600, splash: 2000 }[kind];
+    const base = { boom: 1.1, cannon: 0.6, launch: 0.5, jet: 0.35, mg: 0.3, ping: 0.12, hit: 0.55, splash: 0.3 }[kind];
+    if (!range) return;
+    const sp = spatial(x, y, range);
+    const vol = sp.vol * base * (kind === 'cannon' ? Math.min(size, 1.3) : size);
     if (vol < 0.01) return;
+    const s = clamp(size, 0.4, 2.5);
 
+    // Output chain: air absorption (distant sounds lose their highs) -> pan -> master
     const out = ac.createGain();
+    const air = ac.createBiquadFilter();
+    air.type = 'lowpass';
+    air.frequency.value = lerp(14000, 900, clamp(Math.hypot(x - cam.x, y - cam.y) / range, 0, 1));
+    out.connect(air);
     const pan = ac.createStereoPanner ? ac.createStereoPanner() : null;
-    if (pan) { pan.pan.value = sp.pan; out.connect(pan); pan.connect(audio.master); }
-    else out.connect(audio.master);
+    if (pan) { pan.pan.value = sp.pan; air.connect(pan); pan.connect(audio.master); }
+    else air.connect(audio.master);
 
-    const src = ac.createBufferSource();
-    src.buffer = audio.noise;
-    src.playbackRate.value = rand(0.7, 1.1);
-    const lp = ac.createBiquadFilter();
-    lp.type = 'lowpass';
-    lp.frequency.setValueAtTime(cfg.f0, t);
-    lp.frequency.exponentialRampToValueAtTime(cfg.f1, t + cfg.dur * (cfg.rise ? 0.5 : 1));
-    const env = ac.createGain();
-    env.gain.setValueAtTime(0.0001, t);
-    env.gain.exponentialRampToValueAtTime(vol, t + (cfg.rise ? 0.3 : 0.008));
-    env.gain.exponentialRampToValueAtTime(0.0001, t + cfg.dur);
-    src.connect(lp); lp.connect(env); env.connect(out);
-    src.start(t, rand(0, 1));
-    src.stop(t + cfg.dur + 0.05);
-
-    // Low sine thump gives weight to cannons and explosions
-    if (cfg.thump) {
-        const o = ac.createOscillator();
-        o.type = 'sine';
-        o.frequency.setValueAtTime(cfg.thump * 1.6, t);
-        o.frequency.exponentialRampToValueAtTime(cfg.thump * 0.5, t + cfg.dur * 0.6);
+    // Filtered noise burst with attack/decay envelope
+    const burst = o => {
+        const t0 = t + (o.delay || 0);
+        const src = ac.createBufferSource();
+        src.buffer = o.brown ? audio.brown : audio.noise;
+        src.loop = true;
+        src.playbackRate.value = rand(0.8, 1.15);
+        const f = ac.createBiquadFilter();
+        f.type = o.type || 'lowpass';
+        f.Q.value = o.q || 0.7;
+        f.frequency.setValueAtTime(o.f0, t0);
+        if (o.f1) f.frequency.exponentialRampToValueAtTime(o.f1, t0 + o.dur);
+        const env = ac.createGain();
+        env.gain.setValueAtTime(0.0001, t0);
+        env.gain.exponentialRampToValueAtTime(Math.max(0.0002, o.g), t0 + (o.at || 0.003));
+        env.gain.exponentialRampToValueAtTime(0.0001, t0 + o.dur);
+        src.connect(f); f.connect(env); env.connect(out);
+        src.start(t0, rand(0, 1.5));
+        src.stop(t0 + o.dur + 0.05);
+    };
+    // Sine with falling pitch: pressure wave / body
+    const thump = o => {
+        const t0 = t + (o.delay || 0);
+        const osc = ac.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(o.f0, t0);
+        osc.frequency.exponentialRampToValueAtTime(o.f1, t0 + o.dur * 0.7);
         const g = ac.createGain();
-        g.gain.setValueAtTime(0.0001, t);
-        g.gain.exponentialRampToValueAtTime(vol * 0.9, t + 0.01);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + cfg.dur * 0.6);
-        o.connect(g); g.connect(out);
-        o.start(t);
-        o.stop(t + cfg.dur);
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(Math.max(0.0002, o.g), t0 + 0.005);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + o.dur);
+        osc.connect(g); g.connect(out);
+        osc.start(t0);
+        osc.stop(t0 + o.dur + 0.05);
+    };
+
+    switch (kind) {
+        case 'cannon':
+            // Sharp muzzle crack, blast body, low punch and a rolling echo over the water
+            burst({ type: 'highpass', f0: 2500, q: 0.5, at: 0.001, dur: 0.04 + 0.03 * s, g: vol * 0.7 });
+            burst({ type: 'lowpass', f0: 2600 / s, f1: 220 / s, at: 0.002, dur: 0.18 + 0.35 * s, g: vol });
+            thump({ f0: 110 / s, f1: 40 / s, dur: 0.15 + 0.25 * s, g: vol * 0.9 });
+            burst({ brown: true, type: 'lowpass', f0: 500, f1: 150, at: 0.06, dur: 0.8 + 1.0 * s, g: vol * 0.45, delay: 0.05 });
+            break;
+        case 'mg':
+            // Short dry report
+            burst({ type: 'highpass', f0: 1800, at: 0.001, dur: 0.035, g: vol });
+            burst({ type: 'lowpass', f0: 1800, f1: 400, at: 0.001, dur: 0.08, g: vol * 0.6 });
+            thump({ f0: 160, f1: 80, dur: 0.05, g: vol * 0.5 });
+            break;
+        case 'boom': {
+            // Shock crack, darkening blast, sub-bass pressure wave, long rumble and debris crackle
+            burst({ type: 'highpass', f0: 1200, at: 0.001, dur: 0.06, g: vol * 0.6 });
+            burst({ type: 'lowpass', f0: 3000, f1: 180, at: 0.004, dur: 0.6 + 0.5 * s, g: vol });
+            thump({ f0: 70, f1: 28, dur: 0.8 + 0.6 * s, g: vol * 1.1 });
+            burst({ brown: true, type: 'lowpass', f0: 400, f1: 90, at: 0.15, dur: 1.8 + 1.4 * s, g: vol * 0.8, delay: 0.05 });
+            const n = Math.round(4 + 4 * s);
+            for (let i = 0; i < n; i++) {
+                burst({ type: 'bandpass', f0: rand(1500, 4500), q: 2, at: 0.001, dur: rand(0.03, 0.09), g: vol * rand(0.15, 0.35), delay: rand(0.1, 1.2) });
+            }
+            break;
+        }
+        case 'hit':
+            // Shell on armour: metallic ring plus a short blast
+            for (const f of [rand(700, 900), rand(1500, 1900), rand(2900, 3400)]) {
+                burst({ type: 'bandpass', f0: f, q: 18, at: 0.001, dur: rand(0.25, 0.45), g: vol * 4 });
+            }
+            burst({ type: 'lowpass', f0: 2500, f1: 200, at: 0.002, dur: 0.35, g: vol * 0.7 });
+            thump({ f0: 120, f1: 50, dur: 0.2, g: vol * 0.6 });
+            break;
+        case 'splash':
+            // Dull plop, water column, then hiss of falling spray
+            thump({ f0: 90, f1: 45, dur: 0.18, g: vol * 0.7 });
+            burst({ type: 'bandpass', f0: 900, f1: 350, q: 0.8, at: 0.015, dur: 0.5, g: vol });
+            burst({ type: 'highpass', f0: 3000, at: 0.12, dur: 0.9, g: vol * 0.4, delay: 0.15 });
+            break;
+        case 'launch':
+            // Missile ignition pop followed by a roaring rocket hiss
+            thump({ f0: 140, f1: 60, dur: 0.12, g: vol * 0.6 });
+            burst({ type: 'bandpass', f0: 1200, f1: 2600, q: 0.7, at: 0.02, dur: 1.1, g: vol });
+            burst({ brown: true, type: 'lowpass', f0: 500, f1: 250, at: 0.03, dur: 1.0, g: vol * 0.7 });
+            break;
+        case 'jet':
+            // Rising jet roar
+            burst({ type: 'lowpass', f0: 600, f1: 3500, at: 0.3, dur: 1.8, g: vol });
+            burst({ brown: true, type: 'lowpass', f0: 300, at: 0.4, dur: 2.0, g: vol * 0.8 });
+            break;
+        case 'ping':
+            burst({ type: 'highpass', f0: 3000, at: 0.001, dur: 0.06, g: vol });
+            break;
     }
 }
 
@@ -1966,11 +2577,11 @@ function render() {
 
     if (!gpuWater) drawOcean(view);
 
-    const visible = islandsNear(cam.x, cam.y, Math.max(hw, hh) + 400).filter(isl =>
-        isl.x + isl.r * 1.8 > view.x0 && isl.x - isl.r * 1.8 < view.x1 && isl.y + isl.r * 1.8 > view.y0 && isl.y - isl.r * 1.8 < view.y1);
-    runIslandJobs(Math.max(hw, hh) + 1600);
+    const visible = islandsNear(cam.x, cam.y, Math.max(hw, hh) + ISLAND_MAX_R * 1.6).filter(isl =>
+        isl.x + isl.r * 1.6 > view.x0 && isl.x - isl.r * 1.6 < view.x1 && isl.y + isl.r * 1.6 > view.y0 && isl.y - isl.r * 1.6 < view.y1);
+    runIslandJobs(Math.max(hw, hh) + 1600 + ISLAND_MAX_R);
     for (const isl of visible) drawIsland(isl);
-    evictIslandSprites();
+    evictIslandSprites(Math.max(hw, hh) + 2400 + ISLAND_MAX_R);
 
     drawParticles(0);
     drawParticles(1);
@@ -2090,30 +2701,115 @@ function coastRadius(isl, a) {
 }
 
 // Aerial-photo style island: per-pixel heightmap with hillshade, beach, forest canopy, rock; palms on top
-function* islandSpriteJob(isl) {
-    const R = isl.r * 1.8;
-    const res = quality.gpu ? 0.9 : 0.6;          // terrain pixels per world unit
-    const N = Math.ceil(R * 2 * res);
-    const sd = (Math.floor(isl.x * 13 + isl.y * 7) | 0) & 0xffff;
+const islandSeed = isl => (Math.floor(isl.x * 13 + isl.y * 7) | 0) & 0xffff;
+
+// Elevation at an island-local point (0 = coastline, 1 = island centre, < 0 = water)
+function islandHeight(isl, x, y, sd) {
+    const d = Math.hypot(x, y), a = Math.atan2(y, x);
+    const edge = d / coastRadius(isl, a);
+    // Far out in the water: skip the noise (fully transparent anyway)
+    if (edge > 1.5) return -1;
+    const n = vfbm(x * 0.018, y * 0.018, sd, 4);
+    let h = 1 - edge + (n - 0.5) * 0.12 * Math.min(1, edge * 1.5);
+    if (h > 0) h += (n - 0.5) * 0.5 * h + (isl.r > 110 ? Math.pow(Math.max(0, vfbm(x * 0.008, y * 0.008, sd + 7, 3) - 0.35), 1.5) * 1.6 * h : 0);
+    return h;
+}
+
+// Forest trees: grid spacing, crown radius (world units) and number of sprite variants
+const TREE = { cell: 12, r: 8, variants: 6 };
+let treeSpriteCache = null;
+
+// Pre-rendered tree crowns (clustered leaf blobs, lit from the top-left) plus matching shadows
+function treeSprites() {
+    if (treeSpriteCache) return treeSpriteCache;
+    const P = 64, greens = [[46, 96, 40], [60, 112, 44], [38, 82, 46], [72, 118, 48], [52, 104, 36], [34, 74, 34]];
+    const crown = [], shadow = [];
+    for (let v = 0; v < TREE.variants; v++) {
+        const base = greens[v % greens.length];
+        const blobs = [];
+        const n = 6 + Math.floor(rand(0, 4));
+        for (let k = 0; k < n; k++) {
+            const a = rand(0, 2 * Math.PI), d = rand(0, P * 0.2);
+            blobs.push({ x: P / 2 + Math.cos(a) * d, y: P / 2 + Math.sin(a) * d, r: rand(P * 0.16, P * 0.24) });
+        }
+        // Shadow silhouette
+        const sc = makeCanvas(P, P), sg = sc.getContext('2d');
+        sg.fillStyle = 'rgba(0,25,0,.32)';
+        for (const b of blobs) { sg.beginPath(); sg.arc(b.x, b.y, b.r, 0, 2 * Math.PI); sg.fill(); }
+        shadow.push(sc);
+        // Crown: dark rim, lit leaf clusters, small highlights
+        const cc = makeCanvas(P, P), cg = cc.getContext('2d');
+        for (const b of blobs) {
+            cg.fillStyle = `rgb(${base[0] * 0.55},${base[1] * 0.55},${base[2] * 0.55})`;
+            cg.beginPath(); cg.arc(b.x + 1, b.y + 1.5, b.r, 0, 2 * Math.PI); cg.fill();
+        }
+        for (const b of blobs) {
+            const gr = cg.createRadialGradient(b.x - b.r * 0.4, b.y - b.r * 0.45, 0, b.x, b.y, b.r);
+            gr.addColorStop(0, `rgb(${base[0] * 1.6},${base[1] * 1.45},${base[2] * 1.3})`);
+            gr.addColorStop(0.6, `rgb(${base[0]},${base[1]},${base[2]})`);
+            gr.addColorStop(1, `rgb(${base[0] * 0.7},${base[1] * 0.7},${base[2] * 0.7})`);
+            cg.fillStyle = gr;
+            cg.beginPath(); cg.arc(b.x, b.y, b.r * 0.92, 0, 2 * Math.PI); cg.fill();
+        }
+        // Leaf texture speckles
+        for (let k = 0; k < 40; k++) {
+            const b = blobs[k % blobs.length], a = rand(0, 2 * Math.PI), d = rand(0, b.r * 0.8);
+            cg.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,200,.12)' : 'rgba(0,30,0,.18)';
+            cg.beginPath(); cg.arc(b.x + Math.cos(a) * d, b.y + Math.sin(a) * d, rand(1, 2.5), 0, 2 * Math.PI); cg.fill();
+        }
+        crown.push(cc);
+    }
+    return treeSpriteCache = { crown, shadow };
+}
+
+// Palm trees along the beach and forest edge; generated once per island so tiles match
+function islandPalms(isl) {
+    if (isl.palms) return isl.palms;
+    const sd = islandSeed(isl), palms = [];
+    for (let k = 0, tries = 0; k < Math.round(isl.r / 7) && tries < Math.round(isl.r / 7) * 20; tries++) {
+        const a = rand(0, 2 * Math.PI), d = coastRadius(isl, a) * rand(0.62, 0.95);
+        const x = Math.cos(a) * d, y = Math.sin(a) * d;
+        const h = islandHeight(isl, x, y, sd);
+        if (h < 0.06 || h > 0.4) continue;
+        const n = 6 + Math.floor(rand(0, 3));
+        palms.push({ x, y, s: rand(1.4, 2.1), rot: rand(0, 6.28), n,
+            jr: Array.from({ length: n }, () => rand(-0.15, 0.15)), jl: Array.from({ length: n }, () => rand(0.85, 1.1)) });
+        k++;
+    }
+    return isl.palms = palms;
+}
+
+// Renders an island region: the whole island (overview, capped resolution) or one full-detail tile
+function* islandSpriteJob(isl, tile = null) {
+    const R = isl.r * 1.5;
+    const x0 = tile ? tile.x0 : -R, y0 = tile ? tile.y0 : -R, size = tile ? tile.size : R * 2;
+    // Tile entirely in open water: nothing to draw
+    if (tile) {
+        const cx = clamp(0, x0, x0 + size), cy = clamp(0, y0, y0 + size);
+        if (Math.hypot(cx, cy) > isl.r * 1.42) return null;
+    }
+    // Terrain pixels per world unit; the overview is capped so huge islands stay affordable
+    const full = quality.gpu ? 2.4 : 1.2;
+    // Overview (seen from afar) is much sharper with a GPU; tiles follow their detail level
+    const res = tile ? Math.min(full, tile.S * 0.8) : Math.min(full, (quality.gpu ? 2048 : 1200) / size);
+    const N = Math.ceil(size * res);
+    const sd = islandSeed(isl);
     const hills = isl.r > 110;
 
-    // Pass 1: elevation (0 = coastline, 1 = island centre, < 0 = water)
+    // Pass 1: elevation and forest mask
     const H = new Float32Array(N * N), F = new Float32Array(N * N);
     for (let py = 0; py < N; py++) {
         for (let px = 0; px < N; px++) {
-            const x = px / res - R, y = py / res - R;
-            const d = Math.hypot(x, y), a = Math.atan2(y, x);
-            const edge = d / coastRadius(isl, a);
-            const n = vfbm(x * 0.018, y * 0.018, sd, 4);
-            let h = 1 - edge + (n - 0.5) * 0.12 * Math.min(1, edge * 1.5);
-            if (h > 0) h += (n - 0.5) * 0.5 * h + (hills ? Math.pow(Math.max(0, vfbm(x * 0.008, y * 0.008, sd + 7, 3) - 0.35), 1.5) * 1.6 * h : 0);
+            const x = x0 + px / res, y = y0 + py / res;
+            const h = islandHeight(isl, x, y, sd);
             H[py * N + px] = h;
-            F[py * N + px] = vfbm(x * 0.03, y * 0.03, sd + 99, 3);   // forest mask
+            // Forest mask only matters on land
+            F[py * N + px] = h > 0.1 ? vfbm(x * 0.03, y * 0.03, sd + 99, 3) : 0;
         }
         if (performance.now() > jobDeadline) yield;
     }
 
-    // Pass 2: colour + hillshade
+    // Pass 2: colour
     const tc = makeCanvas(N, N), tg = tc.getContext('2d');
     const img = tg.createImageData(N, N), D = img.data;
     const SHALLOW = [70, 196, 190], SANDBED = [196, 205, 160], WET = [176, 156, 108], SAND = [232, 214, 165], SAND2 = [214, 190, 138];
@@ -2123,7 +2819,7 @@ function* islandSpriteJob(isl) {
             const i = py * N + px, h = H[i];
             const o = i * 4;
             if (h < -0.4) { D[o + 3] = 0; continue; }
-            const x = px / res - R, y = py / res - R;
+            const x = x0 + px / res, y = y0 + py / res;
             const grain = vnoise(x * 0.9, y * 0.9, sd + 5);
             let c, alpha = 255;
             if (h < 0) {
@@ -2145,14 +2841,10 @@ function* islandSpriteJob(isl) {
                 const f = F[i];
                 const veg = smooth(0.17, 0.3, h + (f - 0.5) * 0.15);
                 let land;
-                if (f > 0.5 || h > 0.45) {
-                    // Forest canopy: individual crowns with bright tops and dark gaps
-                    const crown = vnoise(x * 0.32, y * 0.32, sd + 11);
-                    const crown2 = vnoise(x * 0.75, y * 0.75, sd + 13);
-                    land = mixc(FOREST, FOREST2, crown);
-                    const gap = smooth(0.25, 0.05, crown * 0.7 + crown2 * 0.3);
-                    land = mixc(land, [22, 48, 24], gap * 0.7);
-                    land = mixc(land, [118, 160, 80], Math.max(0, crown2 - 0.7) * 0.8);
+                if (f > 0.47) {
+                    // Forest floor; the individual trees are drawn on top
+                    land = mixc(FOREST, FOREST2, vnoise(x * 0.1, y * 0.1, sd + 11));
+                    land = mixc(land, [90, 110, 60], grain * 0.25);
                 } else {
                     land = mixc(GRASS, GRASS2, vnoise(x * 0.08, y * 0.08, sd + 17));
                     land = mixc(land, [150, 160, 95], grain * 0.25);
@@ -2163,13 +2855,6 @@ function* islandSpriteJob(isl) {
                 }
                 c = mixc(mixc(SAND, SAND2, grain * 0.5), land, veg);
             }
-            // Hillshade: light from the top-left
-            if (h > -0.05) {
-                const hx = H[i + (px < N - 1 ? 1 : 0)] - H[i - (px > 0 ? 1 : 0)];
-                const hy = H[i + (py < N - 1 ? N : 0)] - H[i - (py > 0 ? N : 0)];
-                const shadeK = clamp(1 + (hx * 0.6 + hy * 0.8) * -9 / res, 0.6, 1.35);
-                c = [c[0] * shadeK, c[1] * shadeK, c[2] * shadeK];
-            }
             D[o] = c[0]; D[o + 1] = c[1]; D[o + 2] = c[2]; D[o + 3] = alpha;
         }
         if (performance.now() > jobDeadline) yield;
@@ -2177,18 +2862,20 @@ function* islandSpriteJob(isl) {
     tg.putImageData(img, 0, 0);
 
     // Final sprite at display resolution
-    const S = spriteScale * 0.75;
-    const c = makeCanvas(R * 2 * S, R * 2 * S);
+    const S = tile ? tile.S : Math.min(spriteScale, (quality.gpu ? 4096 : 3072) / size);
+    const c = makeCanvas(size * S, size * S);
     const g = c.getContext('2d');
     g.imageSmoothingQuality = 'high';
     g.drawImage(tc, 0, 0, c.width, c.height);
     g.scale(S, S);
-    g.translate(R, R);
+    g.translate(-x0, -y0);
+    const inRegion = (x, y, m) => x > x0 - m && x < x0 + size + m && y > y0 - m && y < y0 + size + m;
 
-    // Shore rocks: irregular boulders with shadow
+    // Shore rocks: irregular boulders with shadow (shape stored so tiles match)
     for (const r of isl.rocks) {
-        const pts = [];
-        for (let k = 0; k < 7; k++) pts.push(r.r * rand(0.65, 1));
+        if (!inRegion(r.x, r.y, r.r * 2)) continue;
+        if (!r.pts) r.pts = Array.from({ length: 7 }, () => r.r * rand(0.65, 1));
+        const pts = r.pts;
         const poly = (ox, oy) => {
             g.beginPath();
             for (let k = 0; k < 7; k++) {
@@ -2208,17 +2895,40 @@ function* islandSpriteJob(isl) {
         g.fill();
     }
 
-    // Palm trees along the beach and the forest edge
-    const palms = [];
-    for (let k = 0, tries = 0; k < Math.round(isl.r / 7) && tries < 600; tries++) {
-        const a = rand(0, 2 * Math.PI), d = coastRadius(isl, a) * rand(0.62, 0.9);
-        const x = Math.cos(a) * d, y = Math.sin(a) * d;
-        const px = Math.floor((x + R) * res), py = Math.floor((y + R) * res);
-        const h = H[clamp(py, 0, N - 1) * N + clamp(px, 0, N - 1)];
-        if (h < 0.06 || h > 0.4) continue;
-        palms.push({ x, y, s: rand(0.8, 1.25), rot: rand(0, 6.28), n: 6 + Math.floor(rand(0, 3)) });
-        k++;
+    // Individual forest trees (deterministic grid, so tiles and overview match)
+    const trees = [];
+    const cell = TREE.cell;
+    for (let gy = Math.floor((y0 - 15) / cell); gy <= Math.ceil((y0 + size + 15) / cell); gy++) {
+        for (let gx = Math.floor((x0 - 15) / cell); gx <= Math.ceil((x0 + size + 15) / cell); gx++) {
+            const hs = hash2(gx, gy, sd + 201);
+            if (hs < 0.06) continue;
+            const x = (gx + hash2(gx, gy, sd + 202)) * cell, y = (gy + hash2(gx, gy, sd + 203)) * cell;
+            const d = Math.hypot(x, y);
+            if (d > isl.r) continue;
+            const h = islandHeight(isl, x, y, sd);
+            if (h < 0.2 || (hills && h > 0.85)) continue;
+            const f = vfbm(x * 0.03, y * 0.03, sd + 99, 3);
+            // Dense in forest, a few loose trees on the grass
+            if (f < 0.47 && hs < 0.95) continue;
+            trees.push({ x, y, s: 0.75 + hash2(gx, gy, sd + 204) * 0.7, v: Math.floor(hash2(gx, gy, sd + 205) * TREE.variants) });
+        }
+        if (performance.now() > jobDeadline) yield;
     }
+    const ts = treeSprites();
+    // Shadows first, then crowns
+    for (let k = 0; k < trees.length; k++) {
+        const t = trees[k], R = TREE.r * t.s * 1.25;
+        g.drawImage(ts.shadow[t.v], t.x + SUN.x * 4 * t.s - R, t.y + SUN.y * 4 * t.s - R, R * 2, R * 2);
+        if ((k & 1023) === 1023 && performance.now() > jobDeadline) yield;
+    }
+    for (let k = 0; k < trees.length; k++) {
+        const t = trees[k], R = TREE.r * t.s * 1.25;
+        g.drawImage(ts.crown[t.v], t.x - R, t.y - R, R * 2, R * 2);
+        if ((k & 1023) === 1023 && performance.now() > jobDeadline) yield;
+    }
+
+    // Palm trees along the beach and the forest edge
+    const palms = islandPalms(isl).filter(p => inRegion(p.x, p.y, 40));
     const frondPath = (len, w) => {
         g.beginPath();
         g.moveTo(0, 0);
@@ -2244,8 +2954,8 @@ function* islandSpriteJob(isl) {
         g.translate(p.x, p.y);
         g.rotate(p.rot);
         for (let k = 0; k < p.n; k++) {
-            g.rotate(2 * Math.PI / p.n + rand(-0.15, 0.15));
-            const len = 9 * p.s * rand(0.85, 1.1);
+            g.rotate(2 * Math.PI / p.n + p.jr[k]);
+            const len = 9 * p.s * p.jl[k];
             const fg = g.createLinearGradient(0, 0, len, 0);
             fg.addColorStop(0, '#2f5e22');
             fg.addColorStop(0.5, '#4f8a33');
@@ -2267,19 +2977,115 @@ function* islandSpriteJob(isl) {
         g.fill();
         g.restore();
     }
-    return { canvas: c, R };
+    return { canvas: c, R, x0, y0, size, S };
 }
 
 // Frees sprites of islands far outside the view
-function evictIslandSprites() {
+function evictIslandSprites(keep) {
+    const far = Math.max(3500, keep);
     for (const isl of spritedIslands) {
-        if (Math.hypot(isl.x - cam.x, isl.y - cam.y) > 3500) {
+        if (Math.hypot(isl.x - cam.x, isl.y - cam.y) > far) {
             isl.sprite = null;
+            isl.tiles = null;
             spritedIslands.delete(isl);
         }
     }
     for (const isl of islandJobs.keys())
-        if (Math.hypot(isl.x - cam.x, isl.y - cam.y) > 3500) islandJobs.delete(isl);
+        if (Math.hypot(isl.x - cam.x, isl.y - cam.y) > far) islandJobs.delete(isl);
+    // Detail tiles: keep only those near the view, at the current detail level (or one still in use as stand-in)
+    const hw = vw / 2 / zoom, hh = vh / 2 / zoom, m = ISL_TILE * 1.5, lvl = tileLevel();
+    for (const isl of spritedIslands) {
+        if (!isl.tiles) continue;
+        for (const [key, t] of isl.tiles) {
+            const [l, cell] = key.split('|');
+            const [i, j] = cell.split(',').map(Number);
+            const wx = isl.x + tileOrigin(isl, i) + ISL_TILE / 2, wy = isl.y + tileOrigin(isl, j) + ISL_TILE / 2;
+            const far = Math.abs(wx - cam.x) > hw + m || Math.abs(wy - cam.y) > hh + m;
+            const stale = +l !== lvl && isl.tiles.get(lvl + '|' + cell) !== undefined;
+            if (zoom * dpr < isl.sprite.S * 0.8 || far || stale) isl.tiles.delete(key);
+        }
+    }
+    for (const [key, job] of tileJobs) {
+        const wx = job.isl.x + job.cx, wy = job.isl.y + job.cy;
+        if (!job.isl.tiles || !job.isl.sprite || job.lvl !== lvl || zoom * dpr < job.isl.sprite.S * 0.8 || Math.abs(wx - cam.x) > hw + m || Math.abs(wy - cam.y) > hh + m) tileJobs.delete(key);
+    }
+}
+
+// ---------- full-detail island tiles (used when zoomed in) ----------
+const ISL_TILE = 800;         // tile size in world units
+const tileJobs = new Map();
+// Detail levels: sprite pixels per world unit; top level beats the ship sprites (3 with GPU, 1.5 without)
+const TILE_LEVELS = [0.6, 1.2, 1.8, 2.4, 3.6];
+// Tiles take over once the overview sprite would be magnified on screen
+const needsTiles = sp => zoom * dpr > sp.S * 1.1;
+const tileOrigin = (isl, i) => -isl.r * 1.5 + i * ISL_TILE;
+
+// Lowest detail level that is at least as sharp as the screen
+function tileLevel() {
+    // Highest level: at least as sharp as the ship sprites
+    let max = TILE_LEVELS.findIndex(v => v >= spriteScale * 1.15);
+    if (max < 0) max = TILE_LEVELS.length - 1;
+    // Fully zoomed in: never below the ship sprites' sharpness
+    const need = Math.max(zoom * dpr, userZoom >= ZOOM_MAX * 0.9 ? spriteScale : 0);
+    for (let l = 0; l <= max; l++) if (TILE_LEVELS[l] >= need) return l;
+    return max;
+}
+
+// Draws visible detail tiles (or the matching part of the overview while a tile is building); false when zoomed out
+function drawIslandTiles(isl) {
+    const sp = isl.sprite;
+    // Overview sharp enough at this zoom: no tiles needed
+    if (!sp || !needsTiles(sp)) return false;
+    if (!isl.tiles) isl.tiles = new Map();
+    const hw = vw / 2 / zoom, hh = vh / 2 / zoom;
+    const k = sp.canvas.width / (sp.R * 2), cw = sp.canvas.width;
+    const n = Math.ceil(isl.r * 3 / ISL_TILE), lvl = tileLevel();
+    for (let i = 0; i < n; i++) {
+        const lx = tileOrigin(isl, i), wx = isl.x + lx;
+        if (wx + ISL_TILE < cam.x - hw || wx > cam.x + hw) continue;
+        for (let j = 0; j < n; j++) {
+            const ly = tileOrigin(isl, j), wy = isl.y + ly;
+            if (wy + ISL_TILE < cam.y - hh || wy > cam.y + hh) continue;
+            const cell = i + ',' + j, key = lvl + '|' + cell;
+            const t = isl.tiles.get(key);
+            if (t) {
+                // Tiny overlap hides hairline seams between tiles
+                ctx.drawImage(t.canvas, wx, wy, ISL_TILE + 0.6, ISL_TILE + 0.6);
+                continue;
+            }
+            if (t === null) continue;   // open water
+            const jk = isl.x + ',' + isl.y + ':' + key;
+            if (!tileJobs.has(jk))
+                tileJobs.set(jk, { isl, key, lvl, cx: lx + ISL_TILE / 2, cy: ly + ISL_TILE / 2,
+                    gen: islandSpriteJob(isl, { x0: lx, y0: ly, size: ISL_TILE, S: TILE_LEVELS[lvl] }) });
+            // Stand-in while building: the same tile at another detail level, else the overview
+            let alt = null;
+            for (let l = TILE_LEVELS.length - 1; l >= 0 && !alt; l--) if (l !== lvl) alt = isl.tiles.get(l + '|' + cell);
+            if (alt) {
+                ctx.drawImage(alt.canvas, wx, wy, ISL_TILE + 0.6, ISL_TILE + 0.6);
+            } else {
+                const sx = (lx + sp.R) * k, sy = (ly + sp.R) * k;
+                const sw = Math.min(ISL_TILE * k, cw - sx), sh = Math.min(ISL_TILE * k, cw - sy);
+                if (sw > 0 && sh > 0) ctx.drawImage(sp.canvas, sx, sy, sw, sh, wx, wy, sw / k, sh / k);
+            }
+        }
+    }
+    return true;
+}
+
+// Builds queued detail tiles within the remaining frame budget, nearest first
+function runTileJobs() {
+    if (!tileJobs.size || performance.now() > jobDeadline) return;
+    const order = [...tileJobs.entries()].sort((a, b) =>
+        Math.hypot(a[1].isl.x + a[1].cx - cam.x, a[1].isl.y + a[1].cy - cam.y) - Math.hypot(b[1].isl.x + b[1].cx - cam.x, b[1].isl.y + b[1].cy - cam.y));
+    for (const [jk, job] of order) {
+        if (performance.now() > jobDeadline) break;
+        const r = job.gen.next();
+        if (r.done) {
+            if (job.isl.tiles) job.isl.tiles.set(job.key, r.value || null);
+            tileJobs.delete(jk);
+        }
+    }
 }
 
 // Builds island sprites in the background: a few ms per frame, nearest first, ahead of the view
@@ -2288,8 +3094,8 @@ let jobDeadline = 0;
 function runIslandJobs(radius) {
     for (const isl of islandsNear(cam.x, cam.y, radius))
         if (!isl.sprite && !islandJobs.has(isl)) islandJobs.set(isl, islandSpriteJob(isl));
-    if (!islandJobs.size) return;
-    jobDeadline = performance.now() + 5;
+    jobDeadline = performance.now() + (quality.gpu ? 8 : 5);
+    if (!islandJobs.size) { runTileJobs(); return; }
     const order = [...islandJobs.keys()].sort((a, b) => Math.hypot(a.x - cam.x, a.y - cam.y) - Math.hypot(b.x - cam.x, b.y - cam.y));
     for (const isl of order) {
         if (performance.now() > jobDeadline) break;
@@ -2300,12 +3106,15 @@ function runIslandJobs(radius) {
             islandJobs.delete(isl);
         }
     }
+    runTileJobs();
 }
 
 function drawIsland(isl) {
     const sp = isl.sprite;
-    if (sp) ctx.drawImage(sp.canvas, isl.x - sp.R, isl.y - sp.R, sp.R * 2, sp.R * 2);
-    else {
+    if (sp) {
+        // Zoomed in: detail tiles (overview fills gaps); zoomed out: overview only
+        if (!drawIslandTiles(isl)) ctx.drawImage(sp.canvas, isl.x - sp.R, isl.y - sp.R, sp.R * 2, sp.R * 2);
+    } else {
         // Simple stand-in while the detailed sprite is still being built
         islandPathOn(ctx, isl, 1, isl.x, isl.y);
         ctx.fillStyle = '#dcc690';
@@ -2327,9 +3136,73 @@ function drawIsland(isl) {
 
 // ---------- ships ----------
 // bow = x-fraction where the bow taper starts (lower = sharper)
+// Hull outline per ship style; set before drawing a ship
+let hullShape = 'std';
+const SHAPE_BY_STYLE = { jager: 'slim', fregat: 'std', kruiser: 'cruiser', zwaar: 'heavy', titan: 'battle', carrier: 'carrier' };
+const shapeOf = st => SHAPE_BY_STYLE[st.style] || 'std';
+
+// Carrier flight deck outline (fractions of length / width): angled-deck overhang to port, island sponson to starboard
+const CARRIER_DECK = [
+    [0.50, -0.16], [0.50, 0.14], [0.44, 0.30], [0.20, 0.40], [-0.05, 0.42], [-0.30, 0.40], [-0.47, 0.34],
+    [-0.50, 0.20], [-0.50, -0.30], [-0.45, -0.40], [-0.10, -0.50], [0.12, -0.45], [0.40, -0.38]
+];
+
 function hullPath(L, W, bow = 0.15) {
     const t = L * bow, c = (L / 2 + t) / 2;
     ctx.beginPath();
+    switch (hullShape) {
+        case 'carrier':
+            CARRIER_DECK.forEach(([fx, fy], i) => i ? ctx.lineTo(fx * L, fy * W) : ctx.moveTo(fx * L, fy * W));
+            ctx.closePath();
+            return;
+        case 'slim':
+            // Pointed bow, narrow transom
+            ctx.moveTo(L / 2, 0);
+            ctx.quadraticCurveTo(c, -W / 2, t, -W / 2);
+            ctx.lineTo(-L * 0.22, -W / 2);
+            ctx.quadraticCurveTo(-L * 0.46, -W * 0.46, -L / 2, -W * 0.15);
+            ctx.lineTo(-L / 2, W * 0.15);
+            ctx.quadraticCurveTo(-L * 0.46, W * 0.46, -L * 0.22, W / 2);
+            ctx.lineTo(t, W / 2);
+            ctx.quadraticCurveTo(c, W / 2, L / 2, 0);
+            ctx.closePath();
+            return;
+        case 'cruiser':
+            // Flared clipper bow, round cruiser stern
+            ctx.moveTo(L / 2, 0);
+            ctx.bezierCurveTo(L * 0.42, -W * 0.16, L * 0.3, -W / 2, t, -W / 2);
+            ctx.lineTo(-L * 0.3, -W / 2);
+            ctx.bezierCurveTo(-L * 0.44, -W / 2, -L / 2, -W * 0.3, -L / 2, 0);
+            ctx.bezierCurveTo(-L / 2, W * 0.3, -L * 0.44, W / 2, -L * 0.3, W / 2);
+            ctx.lineTo(t, W / 2);
+            ctx.bezierCurveTo(L * 0.3, W / 2, L * 0.42, W * 0.16, L / 2, 0);
+            ctx.closePath();
+            return;
+        case 'heavy':
+            // Blunt bow, full midship, wide rounded transom
+            ctx.moveTo(L / 2, 0);
+            ctx.quadraticCurveTo(L * 0.44, -W * 0.44, t, -W / 2);
+            ctx.lineTo(-L * 0.38, -W / 2);
+            ctx.quadraticCurveTo(-L / 2, -W * 0.48, -L / 2, -W * 0.2);
+            ctx.lineTo(-L / 2, W * 0.2);
+            ctx.quadraticCurveTo(-L / 2, W * 0.48, -L * 0.38, W / 2);
+            ctx.lineTo(t, W / 2);
+            ctx.quadraticCurveTo(L * 0.44, W * 0.44, L / 2, 0);
+            ctx.closePath();
+            return;
+        case 'battle':
+            // Long fine bow, beam aft of midship, tapering stern
+            ctx.moveTo(L / 2, 0);
+            ctx.bezierCurveTo(L * 0.4, -W * 0.1, L * 0.25, -W / 2, t, -W / 2);
+            ctx.lineTo(-L * 0.05, -W / 2);
+            ctx.bezierCurveTo(-L * 0.22, -W / 2, -L * 0.42, -W * 0.18, -L / 2, -W * 0.07);
+            ctx.lineTo(-L / 2, W * 0.07);
+            ctx.bezierCurveTo(-L * 0.42, W * 0.18, -L * 0.22, W / 2, -L * 0.05, W / 2);
+            ctx.lineTo(t, W / 2);
+            ctx.bezierCurveTo(L * 0.25, W / 2, L * 0.4, W * 0.1, L / 2, 0);
+            ctx.closePath();
+            return;
+    }
     ctx.moveTo(L / 2, 0);
     ctx.quadraticCurveTo(c, -W / 2, t, -W / 2);
     ctx.lineTo(-L * 0.42, -W / 2);
@@ -2388,6 +3261,50 @@ function drawSpecialGear(special, L, W) {
                 block(0, W * y - 5 * Math.sign(y), L * 0.17, 4, '#3a3f44', 1.5);
             }
             break;
+        case 'barrage':
+            // Rocket launcher box with a grid of tubes on the aft deck
+            block(-L * 0.28, 0, L * 0.16, W * 0.5, '#3a3f44', 1.5);
+            ctx.fillStyle = '#121416';
+            for (let i = 0; i < 4; i++)
+                for (let j = 0; j < 3; j++) {
+                    ctx.beginPath();
+                    ctx.arc(-L * 0.34 + i * L * 0.04, (j - 1) * W * 0.13, Math.min(2, W * 0.04), 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+            break;
+        case 'shield':
+            // Heavy armour belt along the hull
+            ctx.strokeStyle = 'rgba(150,190,220,.75)';
+            ctx.lineWidth = 2.2;
+            hullPath(L * 0.94, W * 0.86, 0.15);
+            ctx.stroke();
+            break;
+        case 'emp':
+            // Pulse emitter dish on the foredeck
+            ctx.fillStyle = '#2c3238';
+            ctx.beginPath();
+            ctx.arc(L * 0.2, 0, W * 0.16, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.strokeStyle = '#7fd4ff';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.arc(L * 0.2, 0, W * 0.11, 0, 2 * Math.PI);
+            ctx.moveTo(L * 0.2 - W * 0.05, 0); ctx.lineTo(L * 0.2 + W * 0.05, 0);
+            ctx.stroke();
+            break;
+        case 'heal': {
+            // Helipad with a red cross at the stern
+            const hx = -L * 0.34, hr = W * 0.24;
+            ctx.fillStyle = '#e8e8e8';
+            ctx.beginPath();
+            ctx.arc(hx, 0, hr, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.fillStyle = '#c42424';
+            ctx.fillRect(hx - hr * 0.6, -hr * 0.2, hr * 1.2, hr * 0.4);
+            ctx.fillRect(hx - hr * 0.2, -hr * 0.6, hr * 0.4, hr * 1.2);
+            break;
+        }
+        case 'seekmines':
         case 'mines':
             // Mine rails at the stern
             ctx.strokeStyle = '#1c1f22';
@@ -2406,19 +3323,6 @@ function drawSpecialGear(special, L, W) {
                     ctx.arc(L * x, W * y, 3.2, 0, 2 * Math.PI);
                     ctx.fill();
                 }
-            break;
-        case 'missile':
-            // Vertical launch cells fore and aft of the bridge
-            for (const cx of [0.08, -0.12]) {
-                for (let i = 0; i < 3; i++)
-                    for (let j = 0; j < 2; j++) {
-                        const x = L * cx + (i - 1) * 4.2, y = (j - 0.5) * 4.6 + W * 0.3 * (cx > 0 ? -1 : 1);
-                        ctx.fillStyle = '#2c3034';
-                        ctx.fillRect(x - 1.8, y - 1.8, 3.6, 3.6);
-                        ctx.fillStyle = 'rgba(255,255,255,.18)';
-                        ctx.fillRect(x - 1.8, y - 1.8, 3.6, 0.8);
-                    }
-            }
             break;
         case 'overdrive':
             // Hazard trim
@@ -2468,11 +3372,6 @@ function drawDetails(style, L, W, bow) {
             ctx.beginPath();
             ctx.moveTo(L * 0.09, 0); ctx.lineTo(-L * 0.12, 0);
             ctx.moveTo(L * 0.02, -W * 0.35); ctx.lineTo(L * 0.02, W * 0.35);
-            ctx.stroke();
-            ctx.strokeStyle = '#e8eef8';
-            ctx.lineWidth = 1.5;
-            ctx.beginPath();
-            ctx.arc(L * 0.02, 0, W * 0.12, -Math.PI / 2, Math.PI / 2);
             ctx.stroke();
             break;
         }
@@ -2539,7 +3438,7 @@ function drawDetails(style, L, W, bow) {
         }
         case 'carrier': {
             ctx.save();
-            hullPath(L * 0.92, W * 0.8, bow);
+            hullPath(L * 0.97, W * 0.95, bow);
             ctx.clip();
             // Non-skid flight deck
             ctx.fillStyle = '#4c5257';
@@ -2577,7 +3476,7 @@ function drawDetails(style, L, W, bow) {
             // Edge safety line and deck number
             ctx.strokeStyle = 'rgba(240,200,60,.7)';
             ctx.lineWidth = 0.8;
-            hullPath(L * 0.88, W * 0.74, bow);
+            hullPath(L * 0.95, W * 0.92, bow);
             ctx.stroke();
             ctx.save();
             ctx.translate(L * 0.36, W * 0.24);
@@ -2603,6 +3502,42 @@ function drawDetails(style, L, W, bow) {
             ctx.stroke();
             break;
         }
+        case 'hover': {
+            // Black rubber skirt around the hull
+            ctx.strokeStyle = '#1b1d1f';
+            ctx.lineWidth = Math.max(2, W * 0.09);
+            hullPath(L * 1.0, W * 1.0, bow);
+            ctx.stroke();
+            ctx.strokeStyle = 'rgba(255,255,255,.12)';
+            ctx.lineWidth = 0.8;
+            hullPath(L * 0.97, W * 0.93, bow);
+            ctx.stroke();
+            // Cabin forward
+            block(L * 0.18, 0, L * 0.2, W * 0.45, '#9aa3ab', 2);
+            // Two big lift/thrust fans in ducts at the stern
+            for (const y of [-0.24, 0.24]) {
+                const fx = -L * 0.36, fy = W * y, fr = W * 0.2;
+                ctx.fillStyle = '#2a2e32';
+                ctx.beginPath();
+                ctx.arc(fx, fy, fr * 1.15, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.fillStyle = '#4a5056';
+                for (let k = 0; k < 5; k++) {
+                    const a = k / 5 * 2 * Math.PI;
+                    ctx.beginPath();
+                    ctx.ellipse(fx + Math.cos(a) * fr * 0.5, fy + Math.sin(a) * fr * 0.5, fr * 0.45, fr * 0.16, a, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+                ctx.fillStyle = '#111';
+                ctx.beginPath();
+                ctx.arc(fx, fy, fr * 0.2, 0, 2 * Math.PI);
+                ctx.fill();
+                // Rudder vanes behind the fan
+                ctx.fillStyle = '#3a3f44';
+                ctx.fillRect(fx - fr * 1.35, fy - fr * 0.8, 1.2, fr * 1.6);
+            }
+            break;
+        }
         default: {
             // Fregat style
             block(-L * 0.01, 0, L * 0.15, W * 0.52, '#8a8f94', 1.5);
@@ -2610,6 +3545,43 @@ function drawDetails(style, L, W, bow) {
             break;
         }
     }
+}
+
+// Radar mast position on the superstructure per ship style (ship-local)
+function radarPos(st, L, W) {
+    switch (st.style) {
+        case 'jager': return [L * 0.07, 0];
+        case 'kruiser': return [L * 0.05, 0];
+        case 'zwaar': return [L * 0.05, 0];
+        case 'titan': return [L * 0.06, 0];
+        case 'carrier': return [L * 0.015, W * 0.33];
+        case 'hover': return [L * 0.2, 0];
+        default: return [L * 0.01, 0];
+    }
+}
+
+// Rotating radar antenna; stops when the ship is sunk
+function drawRadar(s, L, W) {
+    if (s.radarPh === undefined) s.radarPh = rand(0, 2 * Math.PI);
+    const [x, y] = radarPos(s.st, L, W);
+    const A = clamp(W * 0.3, 5, 14);
+    ctx.save();
+    ctx.translate(x, y);
+    // Mast platform
+    ctx.fillStyle = '#2a2e32';
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.max(1.6, A * 0.18), 0, 2 * Math.PI);
+    ctx.fill();
+    if (!s.dead) s.radarA = s.radarPh + time * RADAR_RPM;
+    ctx.rotate(s.radarA || 0);
+    setShadow(1.5, 1.5);
+    // Antenna bar with reflector face
+    ctx.fillStyle = '#d8dde3';
+    ctx.fillRect(-0.9, -A / 2, 1.8, A);
+    clearShadow();
+    ctx.fillStyle = '#6b737a';
+    ctx.fillRect(0.4, -A / 2, 0.9, A);
+    ctx.restore();
 }
 
 // Pre-renders hull, deck and superstructure into a cached sprite
@@ -2620,6 +3592,15 @@ function buildShipSprite(st) {
     ctx = c.getContext('2d');
     ctx.scale(S, S);
     ctx.translate(L / 2 + pad, W / 2 + pad);
+    hullShape = shapeOf(st);
+    if (hullShape === 'carrier') {
+        // Narrow hull under the overhanging flight deck
+        hullShape = 'battle';
+        hullPath(L * 0.97, W * 0.62, 0.3);
+        ctx.fillStyle = shade(st.hull, 0.7);
+        ctx.fill();
+        hullShape = 'carrier';
+    }
 
     // Hull sides: rounded shading across the beam
     hullPath(L, W, bow);
@@ -2682,12 +3663,13 @@ function buildShipSprite(st) {
     drawDetails(st.style, L, W, bow);
     drawSpecialGear(st.special, L, W);
 
+    hullShape = 'std';
     ctx = main;
     return { canvas: c, w: L + pad * 2, h: W + pad * 2 };
 }
 
 function shipSprite(st) {
-    const key = `${st.style}|${st.hull}|${st.deck}|${st.length}|${st.width}|${st.bow}|${st.special || ''}`;
+    const key = `${st.id || st.name}|${st.style}|${st.hull}|${st.deck}|${st.length}|${st.width}|${st.bow}|${st.special || ''}`;
     let sp = shipSprites.get(key);
     if (!sp) {
         sp = buildShipSprite(st);
@@ -2717,6 +3699,7 @@ function drawShip(s, shadowScale = 1) {
     const st = s.st, L = st.length, W = st.width, bow = st.bow ?? 0.15;
     const sp = shipSprite(st);
     const frac = clamp(Math.abs(s.speed) / st.speed, 0, 1);
+    hullShape = shapeOf(st);
     ctx.save();
     ctx.translate(s.x, s.y);
     ctx.rotate(s.heading);
@@ -2755,14 +3738,8 @@ function drawShip(s, shadowScale = 1) {
         }
     }
 
-    // Live animated radar on cruisers
-    if (st.style === 'kruiser' && !s.dead) {
-        ctx.strokeStyle = 'rgba(235,240,250,.9)';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(L * 0.02, 0, W * 0.12, time * 3 - Math.PI / 2, time * 3 + Math.PI / 2);
-        ctx.stroke();
-    }
+    // Rotating search radar antenna on the mast
+    if (hasRadar(st)) drawRadar(s, L, W);
     // Scorch damage
     const hurt = 1 - s.hp / s.maxHp;
     if (hurt > 0.2 || s.dead) {
@@ -2795,38 +3772,151 @@ function drawShip(s, shadowScale = 1) {
             ctx.fillStyle = '#0d0e0f';
             ctx.fillRect(len - 1.2, y - bw / 2, 1.2, bw);
         }
-        // Armoured gun house: flat front, rounded back
-        const dome = ctx.createRadialGradient(-R * 0.35, -R * 0.4, 0, 0, 0, R * 1.2);
-        dome.addColorStop(0, shade(st.turret, 1.55));
-        dome.addColorStop(0.6, shade(st.turret, 1.0));
-        dome.addColorStop(1, shade(st.turret, 0.6));
-        ctx.fillStyle = dome;
-        ctx.beginPath();
-        ctx.moveTo(R * 0.75, -R * 0.75);
-        ctx.lineTo(R * 0.75, R * 0.75);
-        ctx.arc(0, 0, R * 1.06, Math.PI * 0.25, Math.PI * 1.75);
-        ctx.closePath();
-        ctx.fill();
-        clearShadow();
-        ctx.strokeStyle = 'rgba(0,0,0,.55)';
-        ctx.lineWidth = 0.8;
-        ctx.stroke();
-        // Rangefinder and hatch
-        ctx.fillStyle = 'rgba(0,0,0,.35)';
-        ctx.fillRect(-R * 0.55, -R * 0.95, R * 0.25, R * 1.9);
-        ctx.fillStyle = 'rgba(255,255,255,.12)';
-        ctx.beginPath();
-        ctx.arc(-R * 0.1, -R * 0.35, R * 0.18, 0, 2 * Math.PI);
-        ctx.fill();
+        drawGunHouse(turretShape(st), R, st.turret);
         // Reload ring for the player
         if (!s.enemy && !s.dead && t.reload > 0) {
             ctx.strokeStyle = 'rgba(255,215,90,.85)';
             ctx.lineWidth = 1.6;
             ctx.beginPath();
-            ctx.arc(0, 0, R * 1.35, 0, 2 * Math.PI * (1 - t.reload / st.reload));
+            ctx.arc(0, 0, R * (turretShape(st) === 'battle' ? 1.6 : 1.35), 0, 2 * Math.PI * (1 - t.reload / (t.reloadMax || st.reload)));
             ctx.stroke();
         }
         ctx.restore();
+    }
+    drawLaunchers(s);
+    hullShape = 'std';
+}
+
+// Gun house shape per ship: round, box (cruiser), battle (battleship), mount (modern single gun), shield (open MG shield)
+const TURRET_BY_SHIP = {
+    korvet: 'mount', jager: 'mount', wesp: 'mount', horzel: 'mount', fregat: 'mount', spin: 'mount', schim: 'mount',
+    specht: 'shield', monitor: 'round', poseidon: 'round',
+    kruiser: 'box', valk: 'box', orka: 'box', arend: 'box',
+    zwaar: 'battle', furie: 'battle', zeus: 'battle', titan: 'battle', leviathan: 'battle'
+};
+
+function turretShape(st) {
+    if (st.turretShape) return st.turretShape;
+    if (TURRET_BY_SHIP[st.id]) return TURRET_BY_SHIP[st.id];
+    if (st.weapon === 'mg') return 'shield';
+    if ((st.barrels || 2) <= 1) return 'mount';
+    return st.width >= 34 ? 'battle' : 'box';
+}
+
+// Polygon helper (points scaled by R)
+function polyPath(R, pts) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0] * R, pts[0][1] * R);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] * R, pts[i][1] * R);
+    ctx.closePath();
+}
+
+// Draws the gun house in turret-local space (x = gun direction); shadow is still active on entry
+function drawGunHouse(shape, R, color) {
+    const plate = ctx.createLinearGradient(-R, -R, R, R);
+    plate.addColorStop(0, shade(color, 1.5));
+    plate.addColorStop(0.55, shade(color, 1.0));
+    plate.addColorStop(1, shade(color, 0.6));
+    const edge = () => {
+        clearShadow();
+        ctx.strokeStyle = 'rgba(0,0,0,.55)';
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+    };
+    switch (shape) {
+        case 'box': {
+            // WWII cruiser turret: sloped front faces, flat back
+            ctx.fillStyle = plate;
+            polyPath(R, [[0.95, -0.6], [0.95, 0.6], [0.35, 1.0], [-1.05, 1.0], [-1.05, -1.0], [0.35, -1.0]]);
+            ctx.fill();
+            edge();
+            // Roof seam, rangefinder ears and hatch
+            ctx.strokeStyle = 'rgba(0,0,0,.25)';
+            ctx.beginPath();
+            ctx.moveTo(0.35 * R, -R); ctx.lineTo(0.35 * R, R);
+            ctx.stroke();
+            ctx.fillStyle = 'rgba(0,0,0,.4)';
+            ctx.fillRect(-0.7 * R, -1.18 * R, 0.28 * R, 2.36 * R);
+            ctx.fillStyle = 'rgba(255,255,255,.12)';
+            ctx.fillRect(-0.35 * R, -0.55 * R, 0.3 * R, 0.3 * R);
+            break;
+        }
+        case 'battle': {
+            // Battleship turret: long armoured house, sloped face, rear overhang
+            ctx.fillStyle = plate;
+            polyPath(R, [[1.0, -0.55], [1.0, 0.55], [0.45, 0.95], [-1.25, 0.95], [-1.42, 0.72], [-1.42, -0.72], [-1.25, -0.95], [0.45, -0.95]]);
+            ctx.fill();
+            edge();
+            ctx.strokeStyle = 'rgba(0,0,0,.25)';
+            ctx.beginPath();
+            ctx.moveTo(0.45 * R, -0.95 * R); ctx.lineTo(0.45 * R, 0.95 * R);
+            ctx.moveTo(-1.0 * R, -0.95 * R); ctx.lineTo(-1.0 * R, 0.95 * R);
+            ctx.stroke();
+            // Rangefinder housing sticking out both sides
+            ctx.fillStyle = shade(color, 0.55);
+            ctx.fillRect(-0.75 * R, -1.3 * R, 0.3 * R, 2.6 * R);
+            ctx.fillStyle = 'rgba(255,255,255,.12)';
+            ctx.fillRect(-0.3 * R, -0.6 * R, 0.28 * R, 0.28 * R);
+            ctx.fillRect(-0.3 * R, 0.32 * R, 0.28 * R, 0.28 * R);
+            break;
+        }
+        case 'mount': {
+            // Modern faceted single-gun mount (stealth shape)
+            ctx.fillStyle = plate;
+            polyPath(R, [[1.05, -0.32], [1.05, 0.32], [0.2, 0.82], [-0.85, 0.72], [-1.0, 0], [-0.85, -0.72], [0.2, -0.82]]);
+            ctx.fill();
+            edge();
+            // Facet ridges
+            ctx.strokeStyle = 'rgba(255,255,255,.18)';
+            ctx.beginPath();
+            ctx.moveTo(1.05 * R, 0); ctx.lineTo(-1.0 * R, 0);
+            ctx.stroke();
+            ctx.strokeStyle = 'rgba(0,0,0,.22)';
+            ctx.beginPath();
+            ctx.moveTo(0.2 * R, -0.82 * R); ctx.lineTo(0.2 * R, 0.82 * R);
+            ctx.stroke();
+            break;
+        }
+        case 'shield': {
+            // Open pedestal mount with curved gun shield
+            ctx.fillStyle = shade(color, 0.7);
+            ctx.beginPath();
+            ctx.arc(0, 0, R * 0.5, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.fillStyle = plate;
+            ctx.beginPath();
+            ctx.arc(0, 0, R * 1.0, -1.15, 1.15);
+            ctx.arc(0, 0, R * 0.74, 1.15, -1.15, true);
+            ctx.closePath();
+            ctx.fill();
+            edge();
+            // Gunner seat
+            ctx.fillStyle = 'rgba(0,0,0,.45)';
+            ctx.fillRect(-0.75 * R, -0.18 * R, 0.35 * R, 0.36 * R);
+            break;
+        }
+        default: {
+            // Round armoured house: flat front, rounded back
+            const dome = ctx.createRadialGradient(-R * 0.35, -R * 0.4, 0, 0, 0, R * 1.2);
+            dome.addColorStop(0, shade(color, 1.55));
+            dome.addColorStop(0.6, shade(color, 1.0));
+            dome.addColorStop(1, shade(color, 0.6));
+            ctx.fillStyle = dome;
+            ctx.beginPath();
+            ctx.moveTo(R * 0.75, -R * 0.75);
+            ctx.lineTo(R * 0.75, R * 0.75);
+            ctx.arc(0, 0, R * 1.06, Math.PI * 0.25, Math.PI * 1.75);
+            ctx.closePath();
+            ctx.fill();
+            edge();
+            // Rangefinder and hatch
+            ctx.fillStyle = 'rgba(0,0,0,.35)';
+            ctx.fillRect(-R * 0.55, -R * 0.95, R * 0.25, R * 1.9);
+            ctx.fillStyle = 'rgba(255,255,255,.12)';
+            ctx.beginPath();
+            ctx.arc(-R * 0.1, -R * 0.35, R * 0.18, 0, 2 * Math.PI);
+            ctx.fill();
+        }
     }
 }
 
@@ -2912,6 +4002,14 @@ function drawMines() {
         ctx.arc(0, 0, 7, 0, 2 * Math.PI);
         ctx.fill();
         clearShadow();
+        // Homing mines: yellow seeker band
+        if (m.seek) {
+            ctx.strokeStyle = '#e0b020';
+            ctx.lineWidth = 1.6;
+            ctx.beginPath();
+            ctx.arc(0, 0, 4.5, 0, 2 * Math.PI);
+            ctx.stroke();
+        }
         ctx.strokeStyle = '#26292c';
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -2989,16 +4087,39 @@ function drawAim() {
 }
 
 function drawMinimap() {
-    // Centered on the camera; the ocean has no edge
-    const size = mini.width, k = size / (MINI_RANGE * 2);
-    const ox = cam.x - MINI_RANGE, oy = cam.y - MINI_RANGE;
+    // Radar map only on ships fitted with radar
+    const radar = !!player && !player.dead && hasRadar(player.st);
+    mini.style.display = radar ? '' : 'none';
+    if (!radar) return;
+    // Centered on the camera; covers at least the own gun range
+    const R = Math.max(MINI_RANGE, player.st.range * 1.4);
+    const size = mini.width, k = size / (R * 2);
+    const ox = cam.x - R, oy = cam.y - R;
     mctx.setTransform(1, 0, 0, 1, 0, 0);
     mctx.fillStyle = 'rgba(12,50,80,.85)';
     mctx.fillRect(0, 0, size, size);
+    // Rotating sweep, synced with the ship's antenna
+    const sa = player.heading + (player.radarA || 0);
+    const sx = (player.x - ox) * k, sy = (player.y - oy) * k;
+    const sweep = mctx.createRadialGradient(sx, sy, 0, sx, sy, size);
+    sweep.addColorStop(0, 'rgba(90,255,140,.28)');
+    sweep.addColorStop(1, 'rgba(90,255,140,0)');
+    mctx.fillStyle = sweep;
+    mctx.beginPath();
+    mctx.moveTo(sx, sy);
+    mctx.arc(sx, sy, size, sa - 0.5, sa);
+    mctx.closePath();
+    mctx.fill();
+    // Own gun range ring
+    mctx.strokeStyle = 'rgba(255,255,255,.25)';
+    mctx.lineWidth = 1;
+    mctx.beginPath();
+    mctx.arc(sx, sy, player.st.range * k, 0, 2 * Math.PI);
+    mctx.stroke();
     mctx.fillStyle = '#d8c48a';
-    for (const isl of islandsNear(cam.x, cam.y, MINI_RANGE + 300)) {
-        mctx.beginPath();
-        mctx.arc((isl.x - ox) * k, (isl.y - oy) * k, Math.max(1.5, isl.r * k), 0, 2 * Math.PI);
+    for (const isl of islandsNear(cam.x, cam.y, R + ISLAND_MAX_R)) {
+        // Real coastline outline
+        islandPathOn(mctx, isl, k, (isl.x - ox) * k, (isl.y - oy) * k);
         mctx.fill();
     }
     mctx.fillStyle = '#ff5a4a';
