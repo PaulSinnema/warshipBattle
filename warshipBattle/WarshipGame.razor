@@ -43,14 +43,10 @@
 }
 
 <div class="touch">
-    @* Steering wheel: drag around to turn, tap the hub to centre the rudder *@
-    <div class="wheel" id="wheel">
-        <div class="wheel-rim" id="wheelRim">
-            <i style="transform:rotate(0deg)"></i><i style="transform:rotate(45deg)"></i>
-            <i style="transform:rotate(90deg)"></i><i style="transform:rotate(135deg)"></i>
-            <b></b>
-        </div>
-        <div class="wheel-hub" id="wheelHub">⎈</div>
+    @* Joystick: push left / right to steer, springs back to the centre *@
+    <div class="stick" id="stick">
+        <div class="stick-ring"></div>
+        <div class="stick-knob" id="stickKnob"></div>
     </div>
     <div class="right">
         <div class="btns">
@@ -61,13 +57,7 @@
             <button class="fix" data-key="KeyT" title="Opstijgen / landen">✈</button>
             <button class="fix" data-key="KeyE" title="Naar je schip (na landen)">🚢</button>
         </div>
-        @* Throttle lever: drag up = forward, down = reverse; snaps to stop *@
-        <div class="throttle" id="throttle">
-            <div class="thr-mark" style="top:0">VOL</div>
-            <div class="thr-mark zero">STOP</div>
-            <div class="thr-mark" style="bottom:0">ACHT.</div>
-            <div class="thr-knob" id="thrKnob"><span id="thrLabel">0%</span></div>
-        </div>
+        @* Throttle lever removed: the joystick handles ahead / astern too *@
     </div>
 </div>
 
@@ -129,7 +119,8 @@
                     }
                     else if (owned.Contains(s.Id))
                     {
-                        <button @onclick="() => SelectShip(s)">Kiezen</button>
+                        @* No switching ships during a game *@
+                        <button disabled="@InGame" @onclick="() => SelectShip(s)">@(InGame ? "Kiezen na het spel" : "Kiezen")</button>
                     }
                     else
                     {
@@ -145,6 +136,21 @@ else if (showMedals)
 {
     <div class="overlay shop">
         <h1>PRESTATIES</h1>
+        @if (rank is not null)
+        {
+            <div class="rank" style="@($"--rc:{rank.Color}")">
+                <b>🎖 Rang: @rank.Name</b>
+                <div class="rank-bar"><i style="@($"width:{(int)(rank.Progress * 100)}%")"></i></div>
+                <span>@(rank.Next != "" ? $"{rank.Kills} / {rank.NextKills} schepen tot zinken gebracht → {rank.Next}" : $"{rank.Kills} schepen — hoogste rang!")</span>
+            </div>
+            <div class="ladder">
+                @foreach (var r in rank.Ladder)
+                {
+                    <span class="@(r.Done ? "done" : "")" style="@($"--rc:{r.Color}")">@r.Name<small>@r.Kills</small></span>
+                }
+            </div>
+        }
+        <div class="controls">@medals.Count(m => m.Done) / @medals.Length prestaties behaald</div>
         <div class="medals">
             @foreach (var m in medals)
             {
@@ -200,7 +206,7 @@ else if (showHangar)
                     }
                     else if (ownedPlanes.Contains(p.Id))
                     {
-                        <button @onclick="() => SelectPlane(p)">Kiezen</button>
+                        <button disabled="@InGame" @onclick="() => SelectPlane(p)">@(InGame ? "Kiezen na het spel" : "Kiezen")</button>
                     }
                     else
                     {
@@ -220,18 +226,18 @@ else
             <div class="overlay"><h1>WARSHIP BATTLE</h1><div>Laden…</div></div>
             break;
         case "start":
-            <div class="overlay">
+            <div class="overlay start">
                 <h1>WARSHIP BATTLE</h1>
-                <div class="controls">
-                    Schakel vijandelijke schepen uit op een eindeloze oceaan.<br />
-                    W/S of ▲▼: vaart &nbsp;•&nbsp; A/D of ◀▶: roer &nbsp;•&nbsp; X: stop &nbsp;•&nbsp; R/🔧: noodreparatie<br />
-                    Muis: torens richten &nbsp;•&nbsp; Klik/spatie: vuren &nbsp;•&nbsp; F/rechtsklik/⚡: speciaal wapen &nbsp;•&nbsp; Esc: pauze &nbsp;•&nbsp; M: geluid aan/uit<br />
-                    Zoomen: scrollwiel, + / − of de knoppen &nbsp;•&nbsp; Telefoon: met twee vingers knijpen<br />
-                    G/💣: dieptebommen (tegen onderzeeërs) &nbsp;•&nbsp; Mik zelf op vliegtuigen om ze neer te halen &nbsp;•&nbsp; Vaar langzaam naar een ⚓ haven voor gratis reparatie en missies<br />
-                    T/✈: opstijgen vanaf een landingsbaan (vliegtuig uit de ✈ Hangar) &nbsp;•&nbsp; Vliegen: W/S gas, A/D sturen, klik/spatie vuren, F bommen/raketten<br />
-                    Landen: langzaam en recht over een landingsbaan, dan T &nbsp;•&nbsp; Geland: T opnieuw opstijgen, E/🚢 terug naar je schip<br />
-                    Telefoon: stuurwiel en gashendel om te varen, tik op zee (of vlak bij een schip) om te richten en vuren
-                </div>
+                <div class="controls">Schakel vijandelijke schepen uit op een eindeloze oceaan.</div>
+                @if (rank is not null)
+                {
+                    @* Rank by total ships sunk *@
+                    <div class="rank" style="@($"--rc:{rank.Color}")">
+                        <b>🎖 @rank.Name</b>
+                        <div class="rank-bar"><i style="@($"width:{(int)(rank.Progress * 100)}%")"></i></div>
+                        <span>@(rank.Next != "" ? $"{rank.Kills} / {rank.NextKills} schepen → {rank.Next}" : $"{rank.Kills} schepen — hoogste rang!")</span>
+                    </div>
+                }
                 <div class="diffs">
                     @foreach (var d in DifficultyCatalog.All)
                     {
@@ -249,18 +255,68 @@ else
                         </button>
                     }
                 </div>
-                <div class="controls">@(vehicle == "plane" && PlaneCatalog.Get(selectedPlane) is { } vp ? $"Vliegtuig: {vp.Name} (start in de lucht, {Current.Name} als thuisbasis)" : $"Schip: {Current.Name}") &nbsp;•&nbsp; 🪙 @FormatCoins(coins)</div>
-                @if (graphics != "")
-                {
-                    <div class="controls gfx">🖥 @graphics</div>
-                }
+                <div class="controls">@(vehicle == "plane" && PlaneCatalog.Get(selectedPlane) is { } vp ? $"Vliegtuig: {vp.Name} (start op een landingsbaan, {Current.Name} als thuisbasis)" : $"Schip: {Current.Name}") &nbsp;•&nbsp; 🪙 @FormatCoins(coins)</div>
                 <div class="buttons">
                     <button @onclick="StartGame">Start</button>
                     <button class="alt" @onclick="OpenShop">Scheepswerf</button>
                     <button class="alt" @onclick="OpenHangar">✈ Hangar</button>
                     <button class="alt" @onclick="OpenMedals">🏅 Prestaties</button>
                 </div>
+                <div class="buttons small">
+                    <button class="alt" @onclick="() => popup = popup == 1 ? 0 : 1">❓ Besturing</button>
+                    <button class="alt" @onclick="() => popup = popup == 2 ? 0 : 2">⚙ Instellingen</button>
+                </div>
             </div>
+            @if (popup == 1)
+            {
+                @* Controls help *@
+                <div class="popup-bg" @onclick="() => popup = 0">
+                    <div class="popup" @onclick:stopPropagation="true">
+                        <h2>❓ Besturing</h2>
+                        <table class="stats help">
+                            <tr><th></th><th>Computer</th><th>Telefoon</th></tr>
+                            <tr><td>Varen</td><td>W/S of ▲▼ vaart, A/D of ◀▶ roer, X stop</td><td>joystick (omhoog vooruit, omlaag achteruit, opzij sturen)</td></tr>
+                            <tr><td>Richten en vuren</td><td>muis richten, klik/spatie vuren</td><td>tik op zee (of vlak bij een schip), 💥</td></tr>
+                            <tr><td>Speciaal wapen</td><td>F of rechtsklik</td><td>⚡</td></tr>
+                            <tr><td>Noodreparatie</td><td>R</td><td>🔧</td></tr>
+                            <tr><td>Dieptebommen</td><td>G</td><td>💣</td></tr>
+                            <tr><td>Opstijgen / landen</td><td>T</td><td>✈</td></tr>
+                            <tr><td>Na de landing naar je schip</td><td>E</td><td>🚢</td></tr>
+                            <tr><td>Vliegen</td><td>W/S gas, A/D sturen, F bommen/raketten</td><td>joystick (omhoog meer gas), ⚡</td></tr>
+                            <tr><td>Zoomen</td><td>scrollwiel of + / −</td><td>knijpen of + / −</td></tr>
+                            <tr><td>Pauze / geluid</td><td>Esc / M</td><td>⏸</td></tr>
+                        </table>
+                        <div class="controls">
+                            Mik zelf op vliegtuigen om ze neer te halen &nbsp;•&nbsp; vaar langzaam naar een ⚓ haven voor gratis reparatie en missies<br />
+                            Landen: langzaam en recht over een landingsbaan of je vliegdekschip, dan T &nbsp;•&nbsp; taxi zelf terug naar het begin om op te stijgen
+                        </div>
+                        <button @onclick="() => popup = 0">Sluiten</button>
+                    </div>
+                </div>
+            }
+            else if (popup == 2)
+            {
+                @* Settings: graphics level *@
+                <div class="popup-bg" @onclick="() => popup = 0">
+                    <div class="popup" @onclick:stopPropagation="true">
+                        <h2>⚙ Instellingen</h2>
+                        <div class="controls">Graphics</div>
+                        <div class="gfx-pick">
+                            @for (var i = -1; i < GfxNames.Length - 1; i++)
+                            {
+                                var lv = i;
+                                <button class="diff @(gfx == lv ? "sel" : "")" @onclick="() => SetGfx(lv)">@GfxNames[lv + 1]</button>
+                            }
+                        </div>
+                        @if (graphics != "")
+                        {
+                            <div class="controls gfx">🖥 @graphics</div>
+                        }
+                        <div class="controls">Hapert het spel? Kies Laag of Ultra laag.</div>
+                        <button @onclick="() => popup = 0">Sluiten</button>
+                    </div>
+                </div>
+            }
             break;
         case "paused":
             <div class="overlay">
@@ -317,6 +373,17 @@ else
     private int jetsAir = -1;
     private int jetCooldown;
     private string graphics = "";
+
+    // Graphics level: -1 = automatic, 0..4 = ultra low .. ultra (stored by game.js in localStorage)
+    private static readonly string[] GfxNames = { "Auto", "Ultra laag", "Laag", "Middel", "Hoog", "Ultra" };
+    private int gfx = -1;
+    private int popup;   // start screen pop-up: 0 none, 1 controls help, 2 settings
+
+    private async Task SetGfx(int level)
+    {
+        gfx = level;
+        if (module is not null) await module.InvokeVoidAsync("setGraphics", level);
+    }
     private bool previewsDrawn;
 
     private ShipType Current => ShipCatalog.Get(selectedId);
@@ -340,11 +407,13 @@ else
         if (coins < p.Price || ownedPlanes.Contains(p.Id)) return;
         coins -= p.Price;
         ownedPlanes.Add(p.Id);
-        await SelectPlane(p);
+        if (InGame) await SaveProgress();
+        else await SelectPlane(p);
     }
 
     private async Task SelectPlane(PlaneType p)
     {
+        if (InGame) return;
         selectedPlane = p.Id;
         vehicle = "plane";
         await SaveProgress();
@@ -389,6 +458,24 @@ else
     // ---------- medals and high scores ----------
     public sealed record MedalInfo(string Name, string Desc, bool Done);
     public sealed record ScoreInfo(int Kills, int Secs, string Date, string Ship);
+    public sealed record LadderItem(string Name, string Color, int Kills, bool Done);
+    public sealed record RankInfo(string Name, string Color, int Kills, string Next, int NextKills, double Progress, LadderItem[] Ladder);
+    private RankInfo? rank;
+
+    private async Task RefreshRank()
+    {
+        if (module is null) return;
+        rank = await module.InvokeAsync<RankInfo>("getRank");
+        StateHasChanged();
+    }
+
+    // Collection achievements (ships / planes owned, maxed upgrade)
+    private async Task CheckCollection()
+    {
+        if (module is null) return;
+        await module.InvokeVoidAsync("checkCollection", owned.Count, ShipCatalog.All.Count, ownedPlanes.Count, PlaneCatalog.All.Count,
+            upgrades.Values.Any(u => u.Any(x => x >= MaxUpgrade)));
+    }
     private bool showMedals;
     private MedalInfo[] medals = Array.Empty<MedalInfo>();
     private ScoreInfo[] scores = Array.Empty<ScoreInfo>();
@@ -398,6 +485,7 @@ else
         if (module is null) return;
         medals = await module.InvokeAsync<MedalInfo[]>("getMedals");
         scores = await module.InvokeAsync<ScoreInfo[]>("getScores", diffId);
+        rank = await module.InvokeAsync<RankInfo>("getRank");
         showMedals = true;
     }
 
@@ -440,6 +528,9 @@ else
         // Version query busts the browser/CDN cache for the game script
         module = await JS.InvokeAsync<IJSObjectReference>("import", $"./js/game.js?v={AppVersion}-{BuildId}");
         await module.InvokeVoidAsync("init", "sea", "minimap", selfRef);
+            gfx = await module.InvokeAsync<int>("getGraphics");
+            await CheckCollection();
+            await RefreshRank();
 
         state = "start";
         StateHasChanged();
@@ -503,6 +594,7 @@ else
             await JS.InvokeVoidAsync("localStorage.setItem", "wb-planes", string.Join(',', ownedPlanes));
             await JS.InvokeVoidAsync("localStorage.setItem", "wb-plane", selectedPlane ?? "");
             await JS.InvokeVoidAsync("localStorage.setItem", "wb-vehicle", vehicle);
+            await CheckCollection();
         }
         catch (JSException) { }
     }
@@ -574,20 +666,25 @@ else
         await module.InvokeVoidAsync("repairFull");
     }
 
+    // A game is running (or paused): switching ship or plane is not allowed then
+    private bool InGame => state is "playing" or "paused";
+
     private async Task BuyShip(ShipType ship)
     {
         if (coins < ship.Price || owned.Contains(ship.Id)) return;
         coins -= ship.Price;
         owned.Add(ship.Id);
-        await SelectShip(ship);
+        // Bought during a game: keep it for later, do not switch now
+        if (InGame) await SaveProgress();
+        else await SelectShip(ship);
     }
 
     private async Task SelectShip(ShipType ship)
     {
+        if (InGame) return;
         selectedId = ship.Id;
         vehicle = "ship";
         await SaveProgress();
-        // Swaps the ship in a running (paused) game
         if (module is not null) await module.InvokeVoidAsync("setShip", Upgraded(ship));
     }
 
@@ -596,6 +693,8 @@ else
     {
         jetsAir = newJets;
         jetCooldown = newJetCooldown;
+        // Back in the menu: update the rank shown there
+        if (newState != state && newState is "start" or "gameover") _ = RefreshRank();
         state = newState;
         kills = newKills;
         enemies = enemiesLeft;

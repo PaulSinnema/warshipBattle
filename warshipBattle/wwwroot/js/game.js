@@ -121,9 +121,11 @@ const lerp = (a, b, t) => a + (b - a) * t;
 const smooth = (a, b, v) => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 const approach = (v, t, step) => (v < t ? Math.min(t, v + step) : Math.max(t, v - step));
 function norm(a) {
-    while (a > Math.PI) a -= 2 * Math.PI;
-    while (a < -Math.PI) a += 2 * Math.PI;
-    return a;
+    // Wrap to -PI..PI without loops (an infinite angle would otherwise hang the game)
+    if (!Number.isFinite(a)) return 0;
+    a = (a + Math.PI) % (2 * Math.PI);
+    if (a < 0) a += 2 * Math.PI;
+    return a - Math.PI;
 }
 // Small seeded PRNG for deterministic islands
 function mulberry32(a) {
@@ -159,18 +161,69 @@ export function init(canvasId, miniId, ref) {
     mctx = mini.getContext('2d');
     // GPU present: WebGL water, full resolution, bigger sprites, more particles
     const gpu = detectGpu();
+    gpuInfo = gpu;
     quality = gpu.gpu
         ? { gpu: true, dprMax: 2, shadows: true, renderer: gpu.renderer }
         : { gpu: false, dprMax: 1, shadows: false, renderer: gpu.renderer };
     spriteScale = gpu.gpu ? 3 : 1.5;
     maxParticles = gpu.gpu ? 4000 : 1200;
-    if (gpu.gpu) water = createWater(canvas);
+    if (gpu.gpu) water = waterObj = createWater(canvas);
     if (dotnet) dotnet.invokeMethodAsync('OnGraphics', water ? `GPU: ${gpu.renderer}` : `Geen GPU (${gpu.renderer})`).catch(() => { });
     tex = makeTextures();
     seed = (Math.random() * 1e9) | 0;
+    // Saved graphics level (-1 = automatic)
+    let lvl = -1;
+    try { lvl = parseInt(localStorage.getItem('wb-gfx') ?? '-1', 10); } catch { }
+    if (lvl >= 0) applyGraphics(lvl);
     resize();
     bindInput();
     requestAnimationFrame(loop);
+}
+
+// ---------- graphics levels: 0 ultra low .. 4 ultra ----------
+const GFX = [
+    { name: 'Ultra laag', dprMax: 0.6, shadows: false, sprite: 0.9, particles: 300, water: false, hq: false },
+    { name: 'Laag', dprMax: 0.85, shadows: false, sprite: 1.2, particles: 700, water: false, hq: false },
+    { name: 'Middel', dprMax: 1, shadows: false, sprite: 1.5, particles: 1500, water: true, hq: false },
+    { name: 'Hoog', dprMax: 1.5, shadows: true, sprite: 2.25, particles: 3000, water: true, hq: true },
+    { name: 'Ultra', dprMax: 2, shadows: true, sprite: 3, particles: 5000, water: true, hq: true }
+];
+let gpuInfo = { gpu: false, renderer: '' }, waterObj = null;
+
+function applyGraphics(level) {
+    const g = GFX[clamp(level | 0, 0, GFX.length - 1)];
+    quality = { gpu: g.hq, dprMax: g.dprMax, shadows: g.shadows, renderer: gpuInfo.renderer };
+    spriteScale = g.sprite;
+    maxParticles = g.particles;
+    // WebGL ocean: created on demand, hidden when not used
+    if (g.water && !waterObj) waterObj = createWater(canvas);
+    water = g.water ? waterObj : null;
+    if (waterObj) waterObj.canvas.style.display = water ? '' : 'none';
+    // Throw away cached sprites so they are rebuilt at the new resolution
+    shipSprites.clear();
+    planeSprites.clear();
+    for (const isl of spritedIslands) { isl.sprite = null; isl.tiles = null; }
+    spritedIslands.clear();
+    islandJobs.clear();
+    tileJobs.clear();
+}
+
+// Called from Blazor: level -1 = automatic (by GPU), 0..4 = ultra low .. ultra
+export function setGraphics(level) {
+    try { localStorage.setItem('wb-gfx', String(level)); } catch { }
+    if (level < 0) {
+        // Automatic: like the original detection — Ultra with a GPU, Middel without (2D water)
+        applyGraphics(gpuInfo.gpu ? 4 : 2);
+        if (!gpuInfo.gpu) {
+            water = null;
+            if (waterObj) waterObj.canvas.style.display = 'none';
+        }
+    } else applyGraphics(level);
+    resize();
+}
+
+export function getGraphics() {
+    try { return parseInt(localStorage.getItem('wb-gfx') ?? '-1', 10); } catch { return -1; }
 }
 
 export function startGame(stats, difficulty) {
@@ -220,20 +273,24 @@ export function drawPreview(canvasId, stats) {
     const c = document.getElementById(canvasId);
     if (!c) return;
     const main = ctx;
-    ctx = c.getContext('2d');
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    const g = ctx.createLinearGradient(0, 0, 0, c.height);
-    g.addColorStop(0, '#1b5578');
-    g.addColorStop(1, '#0e3a58');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, c.width, c.height);
-    const k = Math.min((c.width - 16) / 300, (c.height - 8) / 66);
-    ctx.translate(c.width / 2, c.height / 2);
-    ctx.scale(k, k);
-    const ship = makeShip(stats, 0, 0, 0, false);
-    for (const t of ship.turrets) t.reload = 0;
-    drawShip(ship, 0.6);
-    ctx = main;
+    try {
+        ctx = c.getContext('2d');
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        const g = ctx.createLinearGradient(0, 0, 0, c.height);
+        g.addColorStop(0, '#1b5578');
+        g.addColorStop(1, '#0e3a58');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, c.width, c.height);
+        const k = Math.min((c.width - 16) / 300, (c.height - 8) / 66);
+        ctx.translate(c.width / 2, c.height / 2);
+        ctx.scale(k, k);
+        const ship = makeShip(stats, 0, 0, 0, false);
+        for (const t of ship.turrets) t.reload = 0;
+        drawShip(ship, 0.6);
+    } finally {
+        // Always hand the main canvas back to the game
+        ctx = main;
+    }
 }
 
 export function repairFull() {
@@ -391,6 +448,8 @@ function chunkIslands(cx, cy) {
 
 function islandsNear(x, y, rad) {
     const out = [];
+    // Guard: a non-finite position or radius would make the chunk loops endless (game freezes)
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(rad)) return out;
     const cx0 = Math.floor((x - rad) / CHUNK), cx1 = Math.floor((x + rad) / CHUNK);
     const cy0 = Math.floor((y - rad) / CHUNK), cy1 = Math.floor((y + rad) / CHUNK);
     for (let cx = cx0; cx <= cx1; cx++)
@@ -456,12 +515,55 @@ function setPointer(x, y) {
     mouse.sy = y;
 }
 
-// ---------- phone controls: steering wheel, throttle lever, auto-aim ----------
-const WHEEL_MAX = 135;        // wheel degrees for full rudder
+// ---------- phone controls: joystick, throttle lever, aim assist ----------
+const WHEEL_MAX = 135;        // rudder scale: wheelAngle / WHEEL_MAX = rudder -1..1
 const AIM_SNAP = 90;          // touch aim snaps onto an enemy within this many screen pixels
 let wheelAngle = 0, autoAim = false, fireHeld = false, touchAim = false;
+let stickX = 0, stickY = 0;   // joystick knob offset, -1..1
+// Joystick up/down = throttle (-1..1); only applied once the joystick has been used (keyboard players unaffected)
+let stickThrottle = 0, stickUsed = false;
 
 function bindTouchControls() {
+            // Push left/right to steer, up/down for ahead/astern; springs back to the centre on release
+    const stick = document.getElementById('stick');
+    if (stick) {
+        let id = null;
+        const move = t => {
+            const r = stick.getBoundingClientRect(), rad = r.width / 2;
+            let dx = (t.clientX - (r.left + rad)) / rad, dy = (t.clientY - (r.top + rad)) / rad;
+            const d = Math.hypot(dx, dy);
+            if (d > 1) { dx /= d; dy /= d; }
+            stickX = dx;
+            stickY = dy;
+            // Small dead zone in the middle, then a soft curve for fine control
+            const curve = v => Math.abs(v) < 0.1 ? 0 : Math.sign(v) * Math.pow((Math.abs(v) - 0.1) / 0.9, 1.3);
+            wheelAngle = curve(dx) * WHEEL_MAX;
+            stickThrottle = -curve(dy);   // up = ahead / more power
+            stickUsed = true;
+        };
+        stick.addEventListener('touchstart', e => {
+            e.preventDefault();
+            const t = e.changedTouches[0];
+            id = t.identifier;
+            move(t);
+        }, { passive: false });
+        stick.addEventListener('touchmove', e => {
+            e.preventDefault();
+            for (const t of e.changedTouches) if (t.identifier === id) move(t);
+        }, { passive: false });
+        const end = e => {
+            for (const t of e.changedTouches) {
+                if (t.identifier !== id) continue;
+                id = null;
+                stickX = stickY = 0;
+                wheelAngle = 0;
+                stickThrottle = 0;
+            }
+        };
+        stick.addEventListener('touchend', end);
+        stick.addEventListener('touchcancel', end);
+    }
+
     const wheel = document.getElementById('wheel');
     if (wheel) {
         let last = null, id = null;
@@ -532,6 +634,8 @@ function bindTouchControls() {
 function updateTouchUi() {
     const rim = document.getElementById('wheelRim');
     if (rim) rim.style.transform = `rotate(${wheelAngle}deg)`;
+    const knob2 = document.getElementById('stickKnob');
+    if (knob2) knob2.style.transform = `translate(${stickX * 55}%, ${stickY * 55}%)`;
     const knob = document.getElementById('thrKnob');
     if (knob && player) {
         const t = flying ? flying.thr : player.throttle;
@@ -767,7 +871,7 @@ function spawnEnemy(stOverride) {
 }
 
 // ---------- main loop ----------
-let loopErrors = 0;
+let loopErrors = 0, lastFrameError = '', lastFrameErrorT = -99;
 
 function loop(ts) {
     // Schedule the next frame first: an error in one frame must never stop the game
@@ -775,9 +879,30 @@ function loop(ts) {
     try {
         frame(ts);
     } catch (err) {
-        // Log (a few times) and reset the canvas state so the next frame draws cleanly
         if (loopErrors++ < 5) console.error('warshipBattle frame error:', err);
-        try { if (ctx.reset) ctx.reset(); else ctx.setTransform(1, 0, 0, 1, 0, 0); } catch { }
+        lastFrameError = String(err && err.message || err);
+        lastFrameErrorT = time;
+        try {
+            // A sprite builder may have left the global context pointing at an off-screen canvas
+            ctx = canvas.getContext('2d');
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalAlpha = 1;
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.filter = 'none';
+        } catch { }
+    }
+    // Show a persisting error on screen, so it can be reported
+    if (time - lastFrameErrorT < 3 && lastFrameError) {
+        try {
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.font = 'bold 13px system-ui, sans-serif';
+            ctx.fillStyle = 'rgba(0,0,0,.6)';
+            ctx.fillRect(8, vh - 34, Math.min(vw - 16, 12 + lastFrameError.length * 7), 24);
+            ctx.fillStyle = '#ff8a7a';
+            ctx.textAlign = 'start';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('Fout: ' + lastFrameError, 14, vh - 22);
+        } catch { }
     }
 }
 
@@ -868,6 +993,8 @@ function controlPlayer(dt) {
     if (up) player.throttle = Math.min(1, player.throttle + dt * 0.8);
     if (down) player.throttle = Math.max(-0.5, player.throttle - dt * 0.8);
     if (keys.KeyX) player.throttle = 0;
+    // Phone joystick: up = ahead (up to full), down = astern (up to half)
+    if (stickUsed && !up && !down) player.throttle = stickThrottle >= 0 ? stickThrottle : stickThrottle * 0.5;
     if (keys.KeyR && player.repairCd <= 0 && player.repair <= 0 && (player.hp < player.maxHp || hasPartDamage(player))) {
         player.repair = REPAIR_TIME;
         player.repairCd = REPAIR_COOLDOWN;
@@ -1372,7 +1499,8 @@ function updateShells(dt) {
             }
         }
         while (travel > 0 && !sh.done) {
-            const step = Math.min(8, travel, sh.left);
+            // Always make progress (a shell with no range left must not loop forever)
+            const step = Math.max(0.5, Math.min(8, travel, sh.left));
             sh.x += sh.dx * step;
             sh.y += sh.dy * step;
             sh.left -= step;
@@ -1396,7 +1524,7 @@ function updateShells(dt) {
                 burst(sh.x, sh.y, 5, 'spark', 80, 0.3, 3);
                 burst(sh.x, sh.y, 4, 'smoke', 20, 1.6, 6);
                 sh.done = true;
-            } else if (sh.left <= 0) {
+            } else if (!(sh.left > 0)) {
                 if (!sh.torp && onIsland(sh.x, sh.y)) {
                     // Impact on land
                     burst(sh.x, sh.y, sh.mg ? 3 : 12, 'sand', 60, 1.0, sh.mg ? 3 : 6);
@@ -1894,7 +2022,9 @@ const DECK_JET = { id: 'deck-jet', name: 'Straaljager', length: 28, span: 25, co
 
 function drawJets() {
     for (const j of jets) {
-        drawPlane(DECK_JET, j.x, j.y, j.a, j.alt, 1, 1, j.phase !== 'parked');
+        // Engine off when parked; full burner in the air and on the catapult, idle while taxiing
+        const jetPower = j.phase === 'parked' ? false : (AIR_PHASES.includes(j.phase) || j.phase === 'cat') ? 1 : 0.25;
+        drawPlane(DECK_JET, j.x, j.y, j.a, j.alt, 1, 1, jetPower);
         // Remaining bombs: one under the fuselage, the rest under the wings
         ctx.save();
         ctx.translate(j.x, j.y);
@@ -3131,7 +3261,13 @@ function runTileJobs() {
         Math.hypot(a[1].isl.x + a[1].cx - cam.x, a[1].isl.y + a[1].cy - cam.y) - Math.hypot(b[1].isl.x + b[1].cx - cam.x, b[1].isl.y + b[1].cy - cam.y));
     for (const [jk, job] of order) {
         if (performance.now() > jobDeadline) break;
-        const r = job.gen.next();
+        let r;
+        try { r = job.gen.next(); }
+        catch (err) {
+            // e.g. out of canvas memory on a phone: skip this tile instead of failing every frame
+            console.warn('island tile failed:', err);
+            r = { done: true, value: null };
+        }
         if (r.done) {
             if (job.isl.tiles) job.isl.tiles.set(job.key, r.value || null);
             tileJobs.delete(jk);
@@ -3144,16 +3280,25 @@ const islandJobs = new Map();
 let jobDeadline = 0;
 function runIslandJobs(radius) {
     for (const isl of islandsNear(cam.x, cam.y, radius))
-        if (!isl.sprite && !islandJobs.has(isl)) islandJobs.set(isl, islandSpriteJob(isl));
+        if (!isl.sprite && !islandJobs.has(isl) && !(isl.failT > time - 15)) islandJobs.set(isl, islandSpriteJob(isl));
     jobDeadline = performance.now() + (quality.gpu ? 8 : 5);
     if (!islandJobs.size) { runTileJobs(); return; }
     const order = [...islandJobs.keys()].sort((a, b) => Math.hypot(a.x - cam.x, a.y - cam.y) - Math.hypot(b.x - cam.x, b.y - cam.y));
     for (const isl of order) {
         if (performance.now() > jobDeadline) break;
-        const r = islandJobs.get(isl).next();
+        let r;
+        try { r = islandJobs.get(isl).next(); }
+        catch (err) {
+            // Failed build (memory): keep the simple stand-in and retry later
+            console.warn('island sprite failed:', err);
+            isl.failT = time;
+            islandJobs.delete(isl);
+            continue;
+        }
         if (r.done) {
-            isl.sprite = r.value;
-            spritedIslands.add(isl);
+            isl.sprite = r.value || null;
+            if (isl.sprite) spritedIslands.add(isl);
+            else isl.failT = time;
             islandJobs.delete(isl);
         }
     }
@@ -3723,7 +3868,10 @@ function shipSprite(st) {
     const key = `${st.id || st.name}|${st.style}|${st.hull}|${st.deck}|${st.length}|${st.width}|${st.bow}|${st.special || ''}`;
     let sp = shipSprites.get(key);
     if (!sp) {
-        sp = buildShipSprite(st);
+        // Sprite builders swap the global context: always restore it, even after an error
+        const main = ctx;
+        try { sp = buildShipSprite(st); }
+        finally { ctx = main; hullShape = 'std'; }
         shipSprites.set(key, sp);
     }
     return sp;
@@ -4251,13 +4399,59 @@ const MEDALS = [
     { id: 'run20', name: 'Zeeheld', desc: '20 kills in één ronde' },
     { id: 'kills50', name: 'Veteraan', desc: '50 schepen in totaal' },
     { id: 'kills250', name: 'Admiraal', desc: '250 schepen in totaal' },
+    { id: 'kills1000', name: 'Zeekoning', desc: '1000 schepen in totaal' },
     { id: 'mission', name: 'Opdracht volbracht', desc: 'Voltooi een missie' },
+    { id: 'missions10', name: 'Huurling', desc: 'Voltooi 10 missies' },
     { id: 'convoy', name: 'Escorte', desc: 'Breng een konvooi veilig aan' },
     { id: 'sub', name: 'Onderzeebootjager', desc: 'Breng een onderzeeër tot zinken' },
     { id: 'plane', name: 'Luchtafweer', desc: 'Haal een vliegtuig neer' },
+    { id: 'planes10', name: 'Aas van de lucht', desc: 'Haal 10 vliegtuigen neer' },
+    { id: 'airkill', name: 'Luchtaanval', desc: 'Breng een schip tot zinken vanuit je eigen vliegtuig' },
+    { id: 'airkills25', name: 'Bommenwerperpiloot', desc: '25 schepen vanuit je eigen vliegtuig' },
+    { id: 'landing', name: 'Zachte landing', desc: 'Land je vliegtuig op een baan' },
+    { id: 'carrierLanding', name: 'Vanghaak', desc: 'Land op een vliegdekschip' },
     { id: 'storm', name: 'Stormvast', desc: 'Overleef 60 seconden storm' },
-    { id: 'harbor', name: 'Thuishaven', desc: 'Meer aan in een haven' }
+    { id: 'night', name: 'Nachtjager', desc: 'Breng \'s nachts een schip tot zinken' },
+    { id: 'fog', name: 'Mistvaarder', desc: 'Breng in de mist een schip tot zinken' },
+    { id: 'harbor', name: 'Thuishaven', desc: 'Meer aan in een haven' },
+    { id: 'harbor5', name: 'Zeebonk', desc: 'Meer 5 keer aan in een haven' },
+    { id: 'ships5', name: 'Vlootbouwer', desc: 'Heb 5 schepen in bezit' },
+    { id: 'ships15', name: 'Admiraliteit', desc: 'Heb 15 schepen in bezit' },
+    { id: 'shipsAll', name: 'Complete vloot', desc: 'Heb alle schepen in bezit' },
+    { id: 'planes1', name: 'Piloot', desc: 'Koop je eerste vliegtuig' },
+    { id: 'planesAll', name: 'Luchtmacht', desc: 'Heb alle vliegtuigen in bezit' },
+    { id: 'upgradeMax', name: 'Volledig opgewaardeerd', desc: 'Breng een upgrade naar het maximum' },
+    { id: 'legend', name: 'Levende legende', desc: 'Bereik de rang Legende' },
+    { id: 'all', name: 'Prestatie der prestaties', desc: 'Haal alle andere prestaties' }
 ];
+
+// Ranks by total ships sunk: Brons .. Legende, each in levels 1-3
+const RANK_TIERS = [
+    { name: 'Brons', color: '#cd7f32', at: [0, 10, 25] },
+    { name: 'Zilver', color: '#c0c7cf', at: [50, 75, 100] },
+    { name: 'Goud', color: '#f2c94c', at: [150, 200, 275] },
+    { name: 'Platina', color: '#9fe3e0', at: [350, 450, 550] },
+    { name: 'Smaragd', color: '#3ccf7a', at: [700, 850, 1000] },
+    { name: 'Diamant', color: '#7fc8ff', at: [1250, 1500, 1800] },
+    { name: 'Legende', color: '#ff7ad9', at: [2200, 2700, 3500] }
+];
+const RANKS = RANK_TIERS.flatMap(t => t.at.map((k, i) => ({ name: `${t.name} ${i + 1}`, tier: t.name, color: t.color, kills: k })));
+
+function rankIndex(kills) {
+    let r = 0;
+    for (let i = 0; i < RANKS.length; i++) if (kills >= RANKS[i].kills) r = i;
+    return r;
+}
+
+const totalKills = () => { try { return +localStorage.getItem('wb-total-kills') || 0; } catch { return 0; } };
+
+// Persistent counters for achievements
+function incStat(key) {
+    const s = loadJson('wb-stats', {});
+    s[key] = (s[key] || 0) + 1;
+    saveJson('wb-stats', s);
+    return s[key];
+}
 
 let friendlies = [], planes = [], airBombs = [], depthCharges = [], aaTracers = [];
 let mission = null, missionT = 0, toasts = [], killsSinceBoss = 0, planeTimer = 60, depthCd = 0, aaT = 0;
@@ -4356,6 +4550,7 @@ function updateHarbors() {
         depthCd = 0;
         toast('⚓ Haven: gerepareerd en bevoorraad');
         unlockMedal('harbor');
+        if (incStat('harbors') >= 5) unlockMedal('harbor5');
         if (!mission) newMission(isl);
         report(true);
     }
@@ -4451,6 +4646,7 @@ function endMission(ok) {
     if (ok) {
         reward(mission.reward, '✔ Missie voltooid');
         unlockMedal('mission');
+        if (incStat('missions') >= 10) unlockMedal('missions10');
         if (mission.type === 'escort') unlockMedal('convoy');
     } else toast('✖ Missie mislukt', '#ff8a7a');
     if (mission.ship) mission.ship.leaving = true;
@@ -4537,13 +4733,25 @@ function onEnemyKilled(s) {
     runStats.noDmg++;
     killsSinceBoss++;
     let total = 0;
+    const before = rankIndex(totalKills());
     try { total = (+localStorage.getItem('wb-total-kills') || 0) + 1; localStorage.setItem('wb-total-kills', total); } catch { }
+    // Promotion to a new rank
+    const after = rankIndex(total);
+    if (after > before) toast(`⭐ Nieuwe rang: ${RANKS[after].name}`, RANKS[after].color);
+    if (RANKS[after].tier === 'Legende') unlockMedal('legend');
     unlockMedal('first');
     if (runStats.noDmg >= 10) unlockMedal('streak10');
     if (runStats.kills >= 20) unlockMedal('run20');
     if (total >= 50) unlockMedal('kills50');
     if (total >= 250) unlockMedal('kills250');
+    if (total >= 1000) unlockMedal('kills1000');
     if (s.st.sub) unlockMedal('sub');
+    if (flying && flying.phase === 'air') {
+        unlockMedal('airkill');
+        if (incStat('airKills') >= 25) unlockMedal('airkills25');
+    }
+    if (envLevel('night') > 0.5) unlockMedal('night');
+    if (envLevel('fog') > 0.5) unlockMedal('fog');
     if (s.boss) {
         reward(diff.reward * BOSS.reward, '🏆 Vlaggenschip tot zinken gebracht!');
         unlockMedal('boss');
@@ -4559,8 +4767,9 @@ function spawnPlanes() {
     const cx = player.x + Math.cos(a) * (viewR + 500), cy = player.y + Math.sin(a) * (viewR + 500);
     const h = a + Math.PI;
     for (let i = 0; i < n; i++) {
-        const side = (i - (n - 1) / 2) * 60;
-        planes.push({ x: cx - Math.sin(h) * side - Math.cos(h) * Math.abs(side), y: cy + Math.cos(h) * side - Math.sin(h) * Math.abs(side), a: h, hp: PLANE.hp, bombed: false, down: 0 });
+        // V-formation: wide lateral spacing, each plane keeps its own offset all the way in
+        const side = (i - (n - 1) / 2) * 110, back = Math.abs(side) * 0.8;
+        planes.push({ x: cx - Math.sin(h) * side - Math.cos(h) * back, y: cy + Math.cos(h) * side - Math.sin(h) * back, a: h, hp: PLANE.hp, bombed: false, down: 0, off: side });
     }
     playSound('jet', cx, cy, 1);
     toast('✈ Vijandelijke bommenwerpers!', '#ffd84a');
@@ -4584,16 +4793,26 @@ function updateAir(dt) {
             continue;
         }
         if (!p.bombed) {
-            // Home in on the player, release the bomb when overhead
-            const want = Math.atan2(player.y - p.y, player.x - p.x);
+            // Home in on a point beside the player (formation offset), release the bomb when overhead
+            const tx = player.x - Math.sin(p.a) * (p.off || 0) * 0.5, ty = player.y + Math.cos(p.a) * (p.off || 0) * 0.5;
+            const want = Math.atan2(ty - p.y, tx - p.x);
             p.a += clamp(norm(want - p.a), -1.2 * dt, 1.2 * dt);
-            if (Math.hypot(player.x - p.x, player.y - p.y) < 70) {
+            if (Math.hypot(tx - p.x, ty - p.y) < 70) {
                 p.bombed = true;
                 airBombs.push({ x: p.x, y: p.y, vx: Math.cos(p.a) * 60, vy: Math.sin(p.a) * 60, t: 1.2 });
             }
         }
         p.x += Math.cos(p.a) * PLANE.speed * dt;
         p.y += Math.sin(p.a) * PLANE.speed * dt;
+        // Keep a safe distance from the other bombers
+        for (const q of planes) {
+            if (q === p || q.down) continue;
+            const dx = p.x - q.x, dy = p.y - q.y, d = Math.hypot(dx, dy);
+            if (d > 0.01 && d < 80) {
+                p.x += dx / d * (80 - d) * 0.5;
+                p.y += dy / d * (80 - d) * 0.5;
+            }
+        }
         if (p.bombed && Math.hypot(p.x - player.x, p.y - player.y) > despawnDist()) p.gone = true;
     }
     planes = planes.filter(p => !p.gone);
@@ -4639,6 +4858,7 @@ function hitPlane(p, dmg) {
     explosion(p.x, p.y, false);
     reward(diff.reward * 0.5, '✈ Vliegtuig neergehaald');
     unlockMedal('plane');
+    if (incStat('planesDown') >= 10) unlockMedal('planes10');
     if (mission && mission.type === 'planes') mission.got++;
 }
 
@@ -4704,7 +4924,8 @@ function drawSub(s) {
 function dropDepthCharges() {
     depthCd = DEPTH.cd;
     for (let i = 0; i < DEPTH.n; i++) {
-        const p = local(player, -player.st.length * 0.55 - i * 16, (i - (DEPTH.n - 1) / 2) * 24);
+        // A straight row along the wake, right behind the stern
+        const p = local(player, -player.st.length * 0.55 - i * 30, 0);
         depthCharges.push({ x: p.x, y: p.y, t: DEPTH.fuse + i * 0.25 });
         addParticle({ kind: 'water', x: p.x, y: p.y, vx: 0, vy: 0, max: 0.6, size: 4, grow: 14, alpha: 0.7 });
     }
@@ -4866,10 +5087,35 @@ function unlockMedal(id) {
     const got = loadJson('wb-medals', []);
     if (got.includes(id)) return;
     got.push(id);
+    // Everything else done: the achievement of achievements
+    const allNow = !got.includes('all') && MEDALS.every(m => m.id === 'all' || got.includes(m.id));
+    if (allNow) got.push('all');
     saveJson('wb-medals', got);
     const m = MEDALS.find(x => x.id === id);
     if (m) toast(`🏅 Prestatie: ${m.name}`, '#ffd24a');
+    if (allNow) toast('🏆 Prestatie der prestaties!', '#ffd24a');
     if (player) playSound('ping', player.x, player.y, 2);
+}
+
+// Called from Blazor after loading / buying: collection achievements
+export function checkCollection(ships, shipsTotal, planesOwned, planesTotal, maxUpgrade) {
+    if (ships >= 5) unlockMedal('ships5');
+    if (ships >= 15) unlockMedal('ships15');
+    if (ships >= shipsTotal) unlockMedal('shipsAll');
+    if (planesOwned >= 1) unlockMedal('planes1');
+    if (planesOwned >= planesTotal) unlockMedal('planesAll');
+    if (maxUpgrade) unlockMedal('upgradeMax');
+}
+
+// Current rank for the menus
+export function getRank() {
+    const k = totalKills(), i = rankIndex(k), r = RANKS[i], next = RANKS[i + 1];
+    return {
+        name: r.name, color: r.color, kills: k,
+        next: next ? next.name : '', nextKills: next ? next.kills : k,
+        progress: next ? (k - r.kills) / (next.kills - r.kills) : 1,
+        ladder: RANKS.map(x => ({ name: x.name, color: x.color, kills: x.kills, done: k >= x.kills }))
+    };
 }
 
 function saveScore() {
@@ -5039,17 +5285,22 @@ function runwayOverrun(f) {
     endFlight(true);
 }
 
-// Plane on the ground at the runway threshold (or the carrier's stern), rolling for take-off
+// Plane standing still at the runway threshold (or the carrier's stern), engine off; T starts the take-off
 function launchFrom(strip, dir = 1) {
     const p = planeSel, fr = stripFrame(strip), a = fr.a + (dir < 0 ? Math.PI : 0), half = fr.len / 2;
     flying = {
         st: p, x: fr.x - Math.cos(a) * half * 0.85, y: fr.y - Math.sin(a) * half * 0.85, a,
-        speed: 0, thr: 0.8, hp: p.hp, fuel: p.fuel * AIRSTRIP.fuelMul, ord: p.ordCount, gunT: 0, ordT: 0,
-        phase: 'takeoff', alt: 0, strip
+        speed: 0, thr: 0, hp: p.hp, fuel: p.fuel * AIRSTRIP.fuelMul, ord: p.ordCount, gunT: 0, ordT: 0,
+        phase: 'landed', alt: 0, strip
     };
+    if (fr.deck) {
+        // Position on the deck, so the plane rides along with the carrier
+        flying.deckU = -half * 0.85;
+        flying.deckV = 0;
+        flying.deckRel = 0;
+    }
     player.throttle = strip.carrier ? player.throttle : 0;
-    toast(fr.deck ? `✈ Katapultstart met ${p.name}…` : `✈ Opstijgen met ${p.name}…`, '#cfe0ff');
-    playSound('jet', flying.x, flying.y, 1);
+    toast(fr.deck ? `✈ ${p.name} staat klaar op de katapult — T: opstijgen` : `✈ ${p.name} staat klaar op de baan — T: opstijgen`, '#cfe0ff');
 }
 
 function tryTakeOff() {
@@ -5126,6 +5377,9 @@ function controlPlane(dt) {
     const tPress = tNow && !tLatch, ePress = eNow && !eLatch;
     tLatch = tNow;
     eLatch = eNow;
+    // Phone joystick up/down: in the air around half power (centre = 50%); on the ground up = taxi
+    if (stickUsed && !(keys.KeyW || keys.ArrowUp || keys.KeyS || keys.ArrowDown))
+        f.thr = f.phase === 'air' ? clamp(0.5 + stickThrottle * 0.5, 0, 1) : (stickThrottle >= 0 ? stickThrottle : stickThrottle * 0.5);
 
     // Ground phases: take-off roll, landing roll-out, parked on the runway
     if (f.phase === 'takeoff') {
@@ -5162,6 +5416,7 @@ function controlPlane(dt) {
             f.fuel = st.fuel * AIRSTRIP.fuelMul;
             f.ord = st.ordCount;
             f.hp = st.hp;
+            unlockMedal(fr.deck ? 'carrierLanding' : 'landing');
             if (fr.deck) {
                 // Remember the deck spot so the plane rides along with the carrier
                 f.deckU = nl.u;
@@ -5179,11 +5434,12 @@ function controlPlane(dt) {
         const fr = stripFrame(f.strip);
         const up = keys.KeyW || keys.ArrowUp, down = keys.KeyS || keys.ArrowDown;
         if (up) f.thr = Math.min(1, f.thr + dt * 0.8);
-        if (down) f.thr = Math.max(0, f.thr - dt * 0.8);
+        if (down) f.thr = Math.max(-0.5, f.thr - dt * 0.8);   // below 0 = reverse
         f.speed = approach(f.speed, AIRSTRIP.taxi * 0.6 * f.thr, dt * 40);
         const left = keys.KeyA || keys.ArrowLeft, right = keys.KeyD || keys.ArrowRight;
         const steer = left || right ? (right ? 1 : 0) - (left ? 1 : 0) : wheelAngle / WHEEL_MAX;
-        f.deckRel = norm(f.deckRel + steer * 70 * DEG * dt * clamp(f.speed / 12, 0, 1));
+        // Steering works both ways (reversed when rolling backwards, like a car)
+        f.deckRel = norm(f.deckRel + steer * 70 * DEG * dt * clamp(f.speed / 12, -1, 1));
         const nu = f.deckU + Math.cos(f.deckRel) * f.speed * dt, nv = f.deckV + Math.sin(f.deckRel) * f.speed * dt;
         // Stay on the deck
         if (Math.abs(nu) < fr.len / 2 && Math.abs(nv) < fr.width / 2) { f.deckU = nu; f.deckV = nv; } else f.speed = 0;
@@ -5205,11 +5461,11 @@ function controlPlane(dt) {
         // Taxi on the ground: W/S or the lever to roll, A/D or the wheel to steer
         const up = keys.KeyW || keys.ArrowUp, down = keys.KeyS || keys.ArrowDown;
         if (up) f.thr = Math.min(1, f.thr + dt * 0.8);
-        if (down) f.thr = Math.max(0, f.thr - dt * 0.8);
+        if (down) f.thr = Math.max(-0.5, f.thr - dt * 0.8);   // below 0 = reverse
         f.speed = approach(f.speed, AIRSTRIP.taxi * f.thr, dt * 40);
         const left = keys.KeyA || keys.ArrowLeft, right = keys.KeyD || keys.ArrowRight;
         const steer = left || right ? (right ? 1 : 0) - (left ? 1 : 0) : wheelAngle / WHEEL_MAX;
-        f.a += steer * 70 * DEG * dt * clamp(f.speed / 15, 0, 1);
+        f.a += steer * 70 * DEG * dt * clamp(f.speed / 15, -1, 1);
         const nx = f.x + Math.cos(f.a) * f.speed * dt, ny = f.y + Math.sin(f.a) * f.speed * dt;
         // Stays on land and off the hangar
         if (terrainHeight(nx, ny) > 0.02 && !onHangar(f.strip, nx, ny)) { f.x = nx; f.y = ny; } else f.speed = 0;
@@ -5334,7 +5590,10 @@ function drawPlayerPlane() {
     if (!flying) return;
     const f = flying, st = f.st;
     // Standing still on the ground with the throttle closed: engine off
-    drawPlane(st, f.x, f.y, f.a, f.alt ?? 1, 1, 1, !(f.phase === 'landed' && f.speed < 1 && f.thr < 0.05));
+    // Standing still with the throttle closed, or rolling backwards (pushback): engine off
+    const engOff = f.phase === 'landed' && ((Math.abs(f.speed) < 1 && Math.abs(f.thr) < 0.05) || f.speed < 0 || f.thr < 0);
+    const power = f.phase === 'air' ? 0.25 + f.thr * 0.75 : f.phase === 'takeoff' ? 1 : f.phase === 'landing' ? 0.2 : 0.15 + Math.abs(f.speed) / AIRSTRIP.taxi * 0.25;
+    drawPlane(st, f.x, f.y, f.a, f.alt ?? 1, 1, 1, engOff ? false : power);
     // Jet exhaust trail
     if (st.jet && f.alt > 0.5 && Math.random() < 0.6) {
         addParticle({ kind: 'steam', x: f.x - Math.cos(f.a) * st.length * 0.55, y: f.y - Math.sin(f.a) * st.length * 0.55, vx: 0, vy: 0, max: 0.5, size: 3, grow: 8, alpha: 0.4 });
@@ -5585,14 +5844,7 @@ function drawPlane(p, x, y, a, alt = 1, k = 1, alpha = 1, engine = true) {
     ctx.globalAlpha = alpha;
     ctx.drawImage(sp.canvas, -sp.w / 2, -sp.h / 2, sp.w, sp.h);
     if (p.jet) {
-        if (engine) {
-            // Afterburner glow
-            const gl = ctx.createRadialGradient(-L * 0.52, 0, 0, -L * 0.52, 0, L * 0.12);
-            gl.addColorStop(0, 'rgba(255,200,120,.75)');
-            gl.addColorStop(1, 'rgba(255,120,40,0)');
-            ctx.fillStyle = gl;
-            ctx.beginPath(); ctx.arc(-L * 0.52, 0, L * 0.12, 0, 2 * Math.PI); ctx.fill();
-        }
+        if (engine) drawJetExhaust(L, sp.lay.fw, engine === true ? 1 : engine);
     } else {
         // Running: blur disc plus faint spinning blades; stopped: three solid blades standing still
         for (const [ex, ey] of engines) {
@@ -5725,7 +5977,7 @@ function updatePlaneSound() {
     if (!planeAudio) planeAudio = buildPlaneAudio(st);
     const p = planeAudio, f = flying;
     // Engine power: taxiing is near idle, in the air it follows the throttle
-    const pw = f.phase === 'landed' ? clamp(0.12 + f.speed / AIRSTRIP.taxi * 0.3, 0, 1)
+    const pw = f.phase === 'landed' ? clamp(0.12 + Math.abs(f.speed) / AIRSTRIP.taxi * 0.3, 0, 1)
         : f.phase === 'landing' ? 0.2 : f.phase === 'takeoff' ? 1 : 0.3 + f.thr * 0.7;
     const sp = clamp(f.speed / st.speed, 0, 1);
     if (st.jet) {
@@ -5742,9 +5994,66 @@ function updatePlaneSound() {
         p.toneF.frequency.setTargetAtTime(450 + pw * 1500, t, 0.3);
     }
     p.windG.gain.setTargetAtTime(sp * 0.5 * (f.alt ?? 1), t, 0.4);
-    // Standing still with the throttle closed: engine off (silent)
-    const off = f.phase === 'landed' && f.speed < 1 && f.thr < 0.05;
+    // Standing still with the throttle closed, or rolling backwards: engine off (silent)
+    const off = f.phase === 'landed' && ((Math.abs(f.speed) < 1 && Math.abs(f.thr) < 0.05) || f.speed < 0 || f.thr < 0);
     p.out.gain.setTargetAtTime(muted || off ? 0 : 0.15, t, 0.3);
+}
+
+// Jet exhaust in plane-local space (nozzle at -L/2): heat glow, flickering outer flame, blue-white core
+// and shock diamonds on afterburner. power 0..1 (idle .. full throttle)
+function drawJetExhaust(L, fw, power) {
+    const pw = clamp(power, 0, 1), nx = -L * 0.5, r = fw * 0.42;
+    const flick = 0.88 + Math.random() * 0.24;
+    const len = L * (0.12 + 0.6 * pw) * flick;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    // Soft heat glow around the nozzle
+    const glowR = r * (2.2 + pw * 2.5);
+    const gl = ctx.createRadialGradient(nx - len * 0.15, 0, 0, nx - len * 0.15, 0, glowR);
+    gl.addColorStop(0, `rgba(255,170,90,${0.25 + 0.35 * pw})`);
+    gl.addColorStop(1, 'rgba(255,90,30,0)');
+    ctx.fillStyle = gl;
+    ctx.beginPath(); ctx.arc(nx - len * 0.15, 0, glowR, 0, 2 * Math.PI); ctx.fill();
+    // Outer flame: orange to transparent, slightly ragged
+    const of = ctx.createLinearGradient(nx, 0, nx - len, 0);
+    of.addColorStop(0, `rgba(255,200,120,${0.55 + 0.4 * pw})`);
+    of.addColorStop(0.35, `rgba(255,120,40,${0.35 + 0.35 * pw})`);
+    of.addColorStop(1, 'rgba(255,60,20,0)');
+    ctx.fillStyle = of;
+    const w = r * (1 + 0.5 * pw), wob = (Math.random() - 0.5) * r * 0.4;
+    ctx.beginPath();
+    ctx.moveTo(nx, -r);
+    ctx.quadraticCurveTo(nx - len * 0.45, -w * 1.25 + wob, nx - len, wob * 0.5);
+    ctx.quadraticCurveTo(nx - len * 0.45, w * 1.25 + wob, nx, r);
+    ctx.closePath();
+    ctx.fill();
+    // Inner core: blue-white, shorter and narrower
+    const cl = len * 0.6;
+    const cf = ctx.createLinearGradient(nx, 0, nx - cl, 0);
+    cf.addColorStop(0, 'rgba(235,245,255,.95)');
+    cf.addColorStop(0.45, `rgba(150,195,255,${0.45 + 0.4 * pw})`);
+    cf.addColorStop(1, 'rgba(90,130,255,0)');
+    ctx.fillStyle = cf;
+    ctx.beginPath();
+    ctx.moveTo(nx, -r * 0.7);
+    ctx.quadraticCurveTo(nx - cl * 0.5, -r * 0.75, nx - cl, 0);
+    ctx.quadraticCurveTo(nx - cl * 0.5, r * 0.75, nx, r * 0.7);
+    ctx.closePath();
+    ctx.fill();
+    // Shock diamonds at high power
+    if (pw > 0.55) {
+        const a = (pw - 0.55) / 0.45;
+        for (let k = 0; k < 3; k++) {
+            const dx = nx - len * (0.16 + 0.17 * k);
+            ctx.fillStyle = `rgba(255,240,210,${(0.55 - k * 0.15) * a})`;
+            ctx.beginPath(); ctx.ellipse(dx, 0, r * 0.38, r * (0.42 - k * 0.08), 0, 0, 2 * Math.PI); ctx.fill();
+        }
+    }
+    ctx.restore();
+    // Hot nozzle ring
+    ctx.strokeStyle = `rgba(255,150,80,${0.35 + 0.4 * pw})`;
+    ctx.lineWidth = Math.max(0.4, r * 0.25);
+    ctx.beginPath(); ctx.ellipse(nx, 0, r * 0.25, r, 0, 0, 2 * Math.PI); ctx.stroke();
 }
 
 // Hangar preview: an aircraft over the sea
@@ -5752,6 +6061,11 @@ export function drawPlanePreview(canvasId, p) {
     const c = document.getElementById(canvasId);
     if (!c || !p) return;
     const main = ctx;
+    try { drawPlanePreviewOn(c, p); }
+    finally { ctx = main; }
+}
+
+function drawPlanePreviewOn(c, p) {
     ctx = c.getContext('2d');
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     const g = ctx.createLinearGradient(0, 0, 0, c.height);
@@ -5764,5 +6078,4 @@ export function drawPlanePreview(canvasId, p) {
     ctx.scale(k, k);
     // Nose up in the preview; slight shadow offset for depth
     drawPlane(p, 0, 0, -Math.PI / 2, 0.12);
-    ctx = main;
 }

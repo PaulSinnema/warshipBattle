@@ -22,6 +22,10 @@
         .health-bar { height: 100%; background: #4c4; transition: width .2s; }
         .pause-btn { position: fixed; bottom: calc(16px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); z-index: 15; width: 48px; height: 40px; border-radius: 8px; border: 1px solid rgba(255,255,255,.45); background: rgba(0,0,0,.35); color: #fff; font-weight: bold; cursor: pointer; }
         .overlay { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 16px; background: rgba(5,15,30,.6); }
+        /* Menus scroll on small screens (phone): content stays centred when it fits, starts at the top when it does not */
+        .overlay:not(.banner) { justify-content: flex-start; overflow-y: auto; touch-action: pan-y; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+        .overlay:not(.banner) > :first-child { margin-top: auto; }
+        .overlay:not(.banner) > :last-child { margin-bottom: auto; }
         .overlay.banner { background: none; pointer-events: none; text-shadow: 0 0 6px #000; }
         .overlay h1 { margin: 0 0 12px; font-size: 44px; letter-spacing: 4px; }
         .overlay button { padding: 10px 30px; font-size: 20px; border: 0; border-radius: 6px; background: #c8a63c; color: #111; cursor: pointer; }
@@ -41,7 +45,15 @@
         .card button { margin-top: auto; font-size: 15px; padding: 8px 10px; }
         .touch { position: fixed; left: 0; right: 0; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 15; display: none; justify-content: space-between; align-items: flex-end; padding: 0 calc(16px + env(safe-area-inset-right)) 0 calc(16px + env(safe-area-inset-left)); pointer-events: none; }
         @media (pointer: coarse) { .touch { display: flex; } }
-        .touch .wheel { position: relative; width: 150px; height: 150px; pointer-events: auto; touch-action: none; -webkit-tap-highlight-color: transparent; }
+        .touch .stick { position: relative; width: 140px; height: 140px; border-radius: 50%; pointer-events: auto; touch-action: none; -webkit-tap-highlight-color: transparent;
+            background: radial-gradient(circle, rgba(255,255,255,.10) 0 55%, rgba(255,255,255,.04) 56% 100%); border: 2px solid rgba(255,255,255,.4); box-shadow: inset 0 0 18px rgba(0,0,0,.45); }
+        .touch .stick-ring { position: absolute; inset: 22%; border-radius: 50%; border: 1px dashed rgba(255,255,255,.25); pointer-events: none; }
+        .touch .stick::before, .touch .stick::after { content: '◀'; position: absolute; top: 50%; left: 8px; transform: translateY(-50%); font-size: 13px; opacity: .45; pointer-events: none; }
+        .touch .stick::after { content: '▶'; left: auto; right: 8px; }
+        .touch .stick-ring::before, .touch .stick-ring::after { content: '▲'; position: absolute; left: 50%; top: -40%; transform: translateX(-50%); font-size: 13px; opacity: .45; }
+        .touch .stick-ring::after { content: '▼'; top: auto; bottom: -40%; }
+        .touch .stick-knob { position: absolute; left: 27%; top: 27%; width: 46%; height: 46%; border-radius: 50%; pointer-events: none;
+            background: radial-gradient(circle at 35% 30%, #f2f4f6, #9aa3ab 55%, #4c545c); box-shadow: 0 4px 10px rgba(0,0,0,.5), inset 0 -3px 6px rgba(0,0,0,.35); }
         .upg { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; margin: 6px 0; }
         .upg button { font-size: 12px; padding: 4px 2px; margin: 0; line-height: 1.2; }
         .medals { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; max-width: 920px; margin: 8px auto; text-align: left; }
@@ -49,6 +61,49 @@
         .medal.done { opacity: 1; border-color: #e8c34a; background: rgba(232,195,74,.12); }
         .medal span { font-size: 13px; opacity: .8; }
         .scores { margin: 6px auto 12px; }
+        .rank { display: flex; flex-direction: column; align-items: center; gap: 3px; margin: 2px 0 10px; }
+        .rank b { color: var(--rc); font-size: 18px; text-shadow: 0 0 8px rgba(0,0,0,.6); }
+        .rank span { font-size: 12px; opacity: .85; }
+        .rank-bar { width: 220px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.15); overflow: hidden; }
+        .rank-bar i { display: block; height: 100%; background: var(--rc); }
+        .ladder { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; max-width: 920px; margin: 0 auto 10px; }
+        .ladder span { display: flex; flex-direction: column; align-items: center; padding: 3px 7px; border-radius: 6px; font-size: 11px; border: 1px solid var(--rc); color: var(--rc); opacity: .4; }
+        .ladder span.done { opacity: 1; background: rgba(255,255,255,.08); }
+        .ladder small { font-size: 9px; opacity: .8; }
+        /* Start screen: slightly tighter so it fits without scrolling */
+        .overlay.start { padding-top: 10px; padding-bottom: 10px; }
+        /* Anchor the start menu to the top of the screen */
+        .overlay.start > :first-child { margin-top: 0; }
+        .overlay.start h1 { margin: 0 0 2px; font-size: clamp(26px, 6.5vh, 44px); letter-spacing: 3px; }
+        .overlay.start .controls { margin: 2px 0 4px; font-size: 13px; line-height: 1.3; }
+        .overlay.start .rank { margin: 2px 0 4px; gap: 2px; }
+        .overlay.start .rank b { font-size: 16px; }
+        .overlay.start .rank span { font-size: 11px; }
+        .overlay.start .diffs { margin: 4px 0; gap: 6px; }
+        .overlay.start button.diff { padding: 5px 12px; font-size: 14px; gap: 2px; }
+        .overlay.start button.diff span { font-size: 11px; }
+        .overlay.start .buttons { margin: 4px 0; gap: 8px; }
+        .overlay.start .buttons button { padding: 7px 20px; font-size: 17px; }
+        .overlay.start .buttons.small button { padding: 4px 14px; font-size: 13px; }
+        @media (max-height: 520px) {
+            .overlay.start h1 { font-size: 24px; }
+            .overlay.start .controls { font-size: 12px; margin: 1px 0 2px; }
+            .overlay.start .buttons button { padding: 6px 16px; font-size: 15px; }
+            .overlay.start button.diff { padding: 4px 10px; font-size: 13px; }
+        }
+        .gfx-pick { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin: 4px 0 10px; }
+        .overlay .gfx-pick button.diff, .popup .gfx-pick button.diff { padding: 5px 10px; font-size: 13px; }
+        .buttons.small button { padding: 6px 16px; font-size: 15px; }
+        /* Start screen pop-ups (help, settings) */
+        .popup-bg { position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center; padding: 12px; background: rgba(0,0,0,.55); touch-action: pan-y; }
+        .popup { max-width: 720px; width: 100%; max-height: 100%; overflow-y: auto; padding: 14px 18px; border-radius: 12px; background: rgba(12,32,52,.97); border: 1px solid rgba(255,255,255,.2); text-align: center; touch-action: pan-y; }
+        .popup h2 { margin: 0 0 10px; }
+        .popup button { padding: 8px 26px; font-size: 17px; border: 0; border-radius: 6px; background: #c8a63c; color: #111; cursor: pointer; margin-top: 8px; }
+        .popup button.diff { display: inline-flex; background: rgba(255,255,255,.12); color: #fff; border: 2px solid transparent; margin-top: 0; }
+        .popup button.diff.sel { border-color: #c8a63c; background: rgba(200,166,60,.25); }
+        .help { margin: 0 auto 8px; font-size: 13px; text-align: left; }
+        .help th { text-align: left; opacity: .7; padding-right: 10px; }
+        .help td { padding: 2px 10px 2px 0; vertical-align: top; }
         .plane-swatch { height: 56px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 30px; margin-bottom: 6px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.25); }
         .touch .wheel-rim { position: absolute; inset: 0; border-radius: 50%; border: 9px solid rgba(150,105,60,.85); box-shadow: 0 0 0 2px rgba(0,0,0,.35), inset 0 0 0 2px rgba(0,0,0,.3); background: rgba(0,0,0,.15); }
         .touch .wheel-rim i { position: absolute; left: 50%; top: -6px; bottom: -6px; width: 6px; margin-left: -3px; background: rgba(150,105,60,.85); border-radius: 3px; }
@@ -94,7 +149,7 @@
             .overlay h1 { font-size: 30px; letter-spacing: 2px; }
             .overlay button { font-size: 17px; }
             .controls { font-size: 13px; line-height: 1.5; }
-            .touch .wheel { width: 124px; height: 124px; }
+            .touch .stick { width: 118px; height: 118px; }
             .touch .btns { grid-template-columns: repeat(2, 48px); gap: 6px; }
             .touch .fix { width: 48px; height: 48px; font-size: 19px; }
             .touch .throttle { width: 56px; height: 140px; }
