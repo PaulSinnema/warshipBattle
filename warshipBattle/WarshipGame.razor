@@ -56,8 +56,10 @@
         <div class="btns">
             <button class="fix" data-key="KeyF" title="Speciaal wapen">⚡</button>
             <button class="fix" data-key="KeyR" title="Noodreparatie">🔧</button>
-            <button class="fix auto" id="autoBtn" title="Automatisch richten en vuren">🎯</button>
             <button class="fix" id="fireBtn" title="Vuur (houd ingedrukt)">💥</button>
+            <button class="fix" data-key="KeyG" title="Dieptebommen">💣</button>
+            <button class="fix" data-key="KeyT" title="Opstijgen / landen">✈</button>
+            <button class="fix" data-key="KeyE" title="Naar je schip (na landen)">🚢</button>
         </div>
         @* Throttle lever: drag up = forward, down = reverse; snaps to stop *@
         <div class="throttle" id="throttle">
@@ -84,7 +86,7 @@
         <div class="ships">
             @foreach (var s in ShipCatalog.All)
             {
-                <div class="card @(s.Id == selectedId ? "sel" : "")">
+                <div class="card @(s.Id == selectedId && vehicle == "ship" ? "sel" : "")">
                     <canvas id="@($"prev-{s.Id}")" class="preview" width="200" height="56"></canvas>
                     <h3>@s.Name</h3>
                     <div class="desc">@s.Description</div>
@@ -106,7 +108,22 @@
                         <tr><td>Schade</td><td>@s.Damage</td></tr>
                         <tr><td>Bereik</td><td>@s.Range</td></tr>
                     </table>
-                    @if (s.Id == selectedId)
+                    @if (owned.Contains(s.Id))
+                    {
+                        @* Upgrades: armour, reload, range, speed — 5 levels each *@
+                        <div class="upg">
+                            @for (var i = 0; i < UpgradeNames.Length; i++)
+                            {
+                                var idx = i;
+                                var lvl = Level(s, idx);
+                                <button class="alt" disabled="@(lvl >= MaxUpgrade || coins < UpgradeCost(s, idx))" @onclick="() => BuyUpgrade(s, idx)">
+                                    @UpgradeNames[idx] @lvl/@MaxUpgrade<br />
+                                    <small>@(lvl >= MaxUpgrade ? "max" : $"🪙 {FormatCoins(UpgradeCost(s, idx))}")</small>
+                                </button>
+                            }
+                        </div>
+                    }
+                    @if (s.Id == selectedId && vehicle == "ship")
                     {
                         <button disabled>Geselecteerd</button>
                     }
@@ -124,6 +141,77 @@
         <button @onclick="CloseShop">Terug</button>
     </div>
 }
+else if (showMedals)
+{
+    <div class="overlay shop">
+        <h1>PRESTATIES</h1>
+        <div class="medals">
+            @foreach (var m in medals)
+            {
+                <div class="medal @(m.Done ? "done" : "")">
+                    <b>@(m.Done ? "🏅" : "🔒") @m.Name</b>
+                    <span>@m.Desc</span>
+                </div>
+            }
+        </div>
+        <h3>Ranglijst — @DifficultyCatalog.Get(diffId).Name</h3>
+        @if (scores.Length == 0)
+        {
+            <div class="controls">Nog geen scores op deze moeilijkheid.</div>
+        }
+        else
+        {
+            <table class="stats scores">
+                <tr><td>#</td><td>Kills</td><td>Tijd</td><td>Schip</td><td>Datum</td></tr>
+                @for (var i = 0; i < scores.Length; i++)
+                {
+                    var sc = scores[i];
+                    <tr><td>@(i + 1)</td><td>@sc.Kills</td><td>@(sc.Secs / 60):@((sc.Secs % 60).ToString("00"))</td><td>@sc.Ship</td><td>@sc.Date</td></tr>
+                }
+            </table>
+        }
+        <button @onclick="() => showMedals = false">Terug</button>
+    </div>
+}
+else if (showHangar)
+{
+    <div class="overlay shop">
+        <h1>HANGAR</h1>
+        <div class="coins">🪙 @FormatCoins(coins)</div>
+        <div class="controls">Vaar naar een eiland met een ✈ landingsbaan en druk op T (of ✈) om op te stijgen. Druk boven een landingsbaan op T om te landen.</div>
+        <div class="ships">
+            @foreach (var p in PlaneCatalog.All)
+            {
+                <div class="card @(p.Id == selectedPlane && vehicle == "plane" ? "sel" : "")">
+                    <canvas id="@($"plane-{p.Id}")" class="preview" width="200" height="110"></canvas>
+                    <h3>@p.Name</h3>
+                    <div class="desc">@p.Description</div>
+                    <table class="stats">
+                        <tr><td>Wapens</td><td>@p.GunLabel</td></tr>
+                        <tr><td>Bewapening</td><td>@p.OrdLabel</td></tr>
+                        <tr><td>Pantser</td><td>@p.Hp</td></tr>
+                        <tr><td>Snelheid</td><td>@p.MinSpeed–@p.Speed</td></tr>
+                        <tr><td>Wendbaarheid</td><td>@p.Turn °/s</td></tr>
+                        <tr><td>Brandstof</td><td>@p.Fuel s</td></tr>
+                    </table>
+                    @if (p.Id == selectedPlane && vehicle == "plane")
+                    {
+                        <button disabled>Geselecteerd</button>
+                    }
+                    else if (ownedPlanes.Contains(p.Id))
+                    {
+                        <button @onclick="() => SelectPlane(p)">Kiezen</button>
+                    }
+                    else
+                    {
+                        <button disabled="@(coins < p.Price)" @onclick="() => BuyPlane(p)">Kopen 🪙 @FormatCoins(p.Price)</button>
+                    }
+                </div>
+            }
+        </div>
+        <button @onclick="() => showHangar = false">Terug</button>
+    </div>
+}
 else
 {
     switch (state)
@@ -139,7 +227,10 @@ else
                     W/S of ▲▼: vaart &nbsp;•&nbsp; A/D of ◀▶: roer &nbsp;•&nbsp; X: stop &nbsp;•&nbsp; R/🔧: noodreparatie<br />
                     Muis: torens richten &nbsp;•&nbsp; Klik/spatie: vuren &nbsp;•&nbsp; F/rechtsklik/⚡: speciaal wapen &nbsp;•&nbsp; Esc: pauze &nbsp;•&nbsp; M: geluid aan/uit<br />
                     Zoomen: scrollwiel, + / − of de knoppen &nbsp;•&nbsp; Telefoon: met twee vingers knijpen<br />
-                    Telefoon: knoppen om te varen, tik op zee om te richten en vuren
+                    G/💣: dieptebommen (tegen onderzeeërs) &nbsp;•&nbsp; Mik zelf op vliegtuigen om ze neer te halen &nbsp;•&nbsp; Vaar langzaam naar een ⚓ haven voor gratis reparatie en missies<br />
+                    T/✈: opstijgen vanaf een landingsbaan (vliegtuig uit de ✈ Hangar) &nbsp;•&nbsp; Vliegen: W/S gas, A/D sturen, klik/spatie vuren, F bommen/raketten<br />
+                    Landen: langzaam en recht over een landingsbaan, dan T &nbsp;•&nbsp; Geland: T opnieuw opstijgen, E/🚢 terug naar je schip<br />
+                    Telefoon: stuurwiel en gashendel om te varen, tik op zee (of vlak bij een schip) om te richten en vuren
                 </div>
                 <div class="diffs">
                     @foreach (var d in DifficultyCatalog.All)
@@ -158,7 +249,7 @@ else
                         </button>
                     }
                 </div>
-                <div class="controls">Schip: <b>@Current.Name</b> &nbsp;•&nbsp; 🪙 @FormatCoins(coins)</div>
+                <div class="controls">@(vehicle == "plane" && PlaneCatalog.Get(selectedPlane) is { } vp ? $"Vliegtuig: {vp.Name} (start in de lucht, {Current.Name} als thuisbasis)" : $"Schip: {Current.Name}") &nbsp;•&nbsp; 🪙 @FormatCoins(coins)</div>
                 @if (graphics != "")
                 {
                     <div class="controls gfx">🖥 @graphics</div>
@@ -166,6 +257,8 @@ else
                 <div class="buttons">
                     <button @onclick="StartGame">Start</button>
                     <button class="alt" @onclick="OpenShop">Scheepswerf</button>
+                    <button class="alt" @onclick="OpenHangar">✈ Hangar</button>
+                    <button class="alt" @onclick="OpenMedals">🏅 Prestaties</button>
                 </div>
             </div>
             break;
@@ -180,6 +273,7 @@ else
                         <button class="alt" disabled="@(coins < RepairCost)" @onclick="RepairShip">Repareren 🪙 @FormatCoins(RepairCost)</button>
                     }
                     <button class="alt" @onclick="OpenShop">Scheepswerf</button>
+                    <button class="alt" @onclick="OpenHangar">✈ Hangar</button>
                     <button class="alt" @onclick="Stop">Stoppen</button>
                 </div>
             </div>
@@ -192,6 +286,7 @@ else
                     <button @onclick="StartGame">Opnieuw</button>
                     <button class="alt" @onclick="Stop">Menu</button>
                     <button class="alt" @onclick="OpenShop">Scheepswerf</button>
+                    <button class="alt" @onclick="OpenMedals">🏅 Ranglijst</button>
                 </div>
             </div>
             break;
@@ -225,6 +320,86 @@ else
     private bool previewsDrawn;
 
     private ShipType Current => ShipCatalog.Get(selectedId);
+
+    // ---------- planes (hangar) ----------
+    private bool showHangar;
+    private bool planePreviewsDrawn;
+
+    private void OpenHangar()
+    {
+        showHangar = true;
+        planePreviewsDrawn = false;
+    }
+    // Only one vehicle is selected at a time: "ship" or "plane"
+    private string vehicle = "ship";
+    private readonly HashSet<string> ownedPlanes = new();
+    private string? selectedPlane;
+
+    private async Task BuyPlane(PlaneType p)
+    {
+        if (coins < p.Price || ownedPlanes.Contains(p.Id)) return;
+        coins -= p.Price;
+        ownedPlanes.Add(p.Id);
+        await SelectPlane(p);
+    }
+
+    private async Task SelectPlane(PlaneType p)
+    {
+        selectedPlane = p.Id;
+        vehicle = "plane";
+        await SaveProgress();
+        if (module is not null) await module.InvokeVoidAsync("setPlane", p);
+    }
+
+    // ---------- upgrades ----------
+    private static readonly string[] UpgradeNames = { "Pantser", "Herladen", "Bereik", "Snelheid" };
+    private const int MaxUpgrade = 5;
+    private readonly Dictionary<string, int[]> upgrades = new();
+
+    private int Level(ShipType s, int i) => upgrades.TryGetValue(s.Id, out var u) ? u[i] : 0;
+
+    // Cost grows with the ship price and the level
+    private int UpgradeCost(ShipType s, int i) => Math.Max(500, s.Price / 5) * (Level(s, i) + 1);
+
+    // Ship stats with the bought upgrades applied
+    private ShipType Upgraded(ShipType s)
+    {
+        if (!upgrades.TryGetValue(s.Id, out var u)) return s;
+        return s with
+        {
+            Hp = (int)Math.Round(s.Hp * (1 + 0.12 * u[0])),
+            Reload = s.Reload * (1 - 0.07 * u[1]),
+            Range = s.Range * (1 + 0.08 * u[2]),
+            Speed = s.Speed * (1 + 0.05 * u[3])
+        };
+    }
+
+    private async Task BuyUpgrade(ShipType s, int i)
+    {
+        var cost = UpgradeCost(s, i);
+        if (coins < cost || Level(s, i) >= MaxUpgrade) return;
+        coins -= cost;
+        if (!upgrades.TryGetValue(s.Id, out var u)) upgrades[s.Id] = u = new int[UpgradeNames.Length];
+        u[i]++;
+        await SaveProgress();
+        // Apply at once to the ship in a running (paused) game
+        if (s.Id == selectedId && module is not null) await module.InvokeVoidAsync("setShip", Upgraded(s));
+    }
+
+    // ---------- medals and high scores ----------
+    public sealed record MedalInfo(string Name, string Desc, bool Done);
+    public sealed record ScoreInfo(int Kills, int Secs, string Date, string Ship);
+    private bool showMedals;
+    private MedalInfo[] medals = Array.Empty<MedalInfo>();
+    private ScoreInfo[] scores = Array.Empty<ScoreInfo>();
+
+    private async Task OpenMedals()
+    {
+        if (module is null) return;
+        medals = await module.InvokeAsync<MedalInfo[]>("getMedals");
+        scores = await module.InvokeAsync<ScoreInfo[]>("getScores", diffId);
+        showMedals = true;
+    }
 
     private bool CanRepair => state is "playing" or "paused" && health is > 0 and < 100;
 
@@ -292,6 +467,24 @@ else
 
             var d = DifficultyCatalog.Get(await JS.InvokeAsync<string?>("localStorage.getItem", "wb-diff"));
             if (earned >= d.Unlock) diffId = d.Id;
+
+            // Upgrades: "id:a,b,c,d;id2:..."
+            var pl = await JS.InvokeAsync<string?>("localStorage.getItem", "wb-planes");
+            if (!string.IsNullOrEmpty(pl))
+                foreach (var id in pl.Split(',', StringSplitOptions.RemoveEmptyEntries)) ownedPlanes.Add(id);
+            var ps = await JS.InvokeAsync<string?>("localStorage.getItem", "wb-plane");
+            if (ps is not null && ownedPlanes.Contains(ps)) selectedPlane = ps;
+            var vh = await JS.InvokeAsync<string?>("localStorage.getItem", "wb-vehicle");
+            vehicle = vh == "plane" && selectedPlane is not null ? "plane" : "ship";
+            var up = await JS.InvokeAsync<string?>("localStorage.getItem", "wb-upg");
+            if (!string.IsNullOrEmpty(up))
+                foreach (var part in up.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var kv = part.Split(':');
+                    if (kv.Length != 2) continue;
+                    var lv = kv[1].Split(',').Select(x => int.TryParse(x, out var n) ? Math.Clamp(n, 0, MaxUpgrade) : 0).ToArray();
+                    if (lv.Length == UpgradeNames.Length) upgrades[kv[0]] = lv;
+                }
         }
         catch (JSException) { }
     }
@@ -305,6 +498,11 @@ else
             await JS.InvokeVoidAsync("localStorage.setItem", "wb-owned", string.Join(',', owned));
             await JS.InvokeVoidAsync("localStorage.setItem", "wb-selected", selectedId);
             await JS.InvokeVoidAsync("localStorage.setItem", "wb-diff", diffId);
+            await JS.InvokeVoidAsync("localStorage.setItem", "wb-upg",
+                string.Join(';', upgrades.Select(kv => $"{kv.Key}:{string.Join(',', kv.Value)}")));
+            await JS.InvokeVoidAsync("localStorage.setItem", "wb-planes", string.Join(',', ownedPlanes));
+            await JS.InvokeVoidAsync("localStorage.setItem", "wb-plane", selectedPlane ?? "");
+            await JS.InvokeVoidAsync("localStorage.setItem", "wb-vehicle", vehicle);
         }
         catch (JSException) { }
     }
@@ -320,7 +518,13 @@ else
     {
         showShop = false;
         ActiveDiff = DifficultyCatalog.Get(diffId);
-        if (module is not null) await module.InvokeVoidAsync("startGame", Current, ActiveDiff);
+        if (module is not null)
+        {
+            await module.InvokeVoidAsync("startGame", Upgraded(Current), ActiveDiff);
+            await module.InvokeVoidAsync("setPlane", PlaneCatalog.Get(selectedPlane));
+            // Plane selected: start in the air, the ship waits as home base
+            if (vehicle == "plane" && selectedPlane is not null) await module.InvokeVoidAsync("startFlying");
+        }
     }
 
     private async Task Pause()
@@ -348,7 +552,15 @@ else
 
     private async Task DrawPreviews()
     {
-        if (!showShop || previewsDrawn || module is null) return;
+        if (module is null) return;
+        // Hangar: aircraft pictures
+        if (showHangar && !planePreviewsDrawn)
+        {
+            planePreviewsDrawn = true;
+            foreach (var p in PlaneCatalog.All)
+                await module.InvokeVoidAsync("drawPlanePreview", $"plane-{p.Id}", p);
+        }
+        if (!showShop || previewsDrawn) return;
         previewsDrawn = true;
         foreach (var s in ShipCatalog.All)
             await module.InvokeVoidAsync("drawPreview", $"prev-{s.Id}", s);
@@ -373,9 +585,10 @@ else
     private async Task SelectShip(ShipType ship)
     {
         selectedId = ship.Id;
+        vehicle = "ship";
         await SaveProgress();
         // Swaps the ship in a running (paused) game
-        if (module is not null) await module.InvokeVoidAsync("setShip", ship);
+        if (module is not null) await module.InvokeVoidAsync("setShip", Upgraded(ship));
     }
 
     [JSInvokable]
@@ -405,6 +618,16 @@ else
     {
         coins += ActiveDiff.Reward;
         earned += ActiveDiff.Reward;
+        await SaveProgress();
+        StateHasChanged();
+    }
+
+    // Bonus coins: missions, flagship, aircraft
+    [JSInvokable]
+    public async Task OnReward(int amount)
+    {
+        coins += amount;
+        earned += amount;
         await SaveProgress();
         StateHasChanged();
     }

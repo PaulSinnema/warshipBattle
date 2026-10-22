@@ -82,7 +82,9 @@ const ENEMY_TYPES = [
     { w: 2, name: 'Slagkruiser', hp: 260, speed: 62, accel: 14, turn: 22, turretTurn: 18, reload: 6.5, damage: 26, shellSpeed: 480, range: 860, spread: 1.2, length: 160, width: 33, turrets: 4, barrels: 3, bow: 0.12, style: 'zwaar', hull: '#5e2a26', deck: '#84504a', turret: '#481e1a' },
     // Capital ships (rare)
     { w: 1.5, name: 'Slagschip', hp: 340, speed: 45, accel: 10, turn: 16, turretTurn: 14, reload: 7.0, damage: 34, shellSpeed: 490, range: 920, spread: 1.1, length: 172, width: 37, turrets: 4, barrels: 3, bow: 0.28, style: 'titan', hull: '#3e2e2a', deck: '#665650', turret: '#2e201c' },
-    { w: 0.8, name: 'Dreadnought', hp: 420, speed: 40, accel: 9, turn: 14, turretTurn: 12, reload: 7.5, damage: 38, shellSpeed: 500, range: 980, spread: 1.0, length: 195, width: 41, turrets: 5, barrels: 3, bow: 0.3, style: 'titan', hull: '#322a28', deck: '#5a504c', turret: '#241c1a' }
+    { w: 0.8, name: 'Dreadnought', hp: 420, speed: 40, accel: 9, turn: 14, turretTurn: 12, reload: 7.5, damage: 38, shellSpeed: 500, range: 980, spread: 1.0, length: 195, width: 41, turrets: 5, barrels: 3, bow: 0.3, style: 'titan', hull: '#322a28', deck: '#5a504c', turret: '#241c1a' },
+    // Submarine: submerged, only torpedoes; shells pass over it (use depth charges or torpedoes)
+    { w: 3, name: 'Onderzeeër', hp: 80, speed: 55, accel: 14, turn: 26, turretTurn: 0, reload: 99, damage: 0, shellSpeed: 400, range: 400, spread: 1, length: 95, width: 14, turrets: 0, barrels: 1, bow: 0.1, style: 'sub', hull: '#24303a', deck: '#34424c', turret: '#1a2228', torp: 2, sub: true }
 ];
 const ENEMY_WEIGHT = ENEMY_TYPES.reduce((a, t) => a + t.w, 0);
 const ENEMY_TORP_CD = 14;     // seconds between enemy torpedo salvos
@@ -194,6 +196,7 @@ export function startGame(stats, difficulty) {
     enemyTargetT = 0;
     for (let i = 0; i < targetEnemies(); i++) spawnEnemy();
     spawnTimer = SPAWN_DELAY;
+    resetExtras();
     setState('playing');
 }
 
@@ -253,6 +256,7 @@ export function stopGame() {
     missiles = [];
     jets = [];
     bombs = [];
+    resetExtras();
     setState('start');
 }
 
@@ -371,6 +375,13 @@ function chunkIslands(cx, cy) {
             const a = r01(0, 2 * Math.PI), d = coastRadius(isl, a) * r01(0.82, 1.0);
             isl.rocks.push({ x: Math.cos(a) * d, y: Math.sin(a) * d, r: r01(5, 13) });
         }
+        // Some islands have a harbor: pier sticking out from the coast
+        if (rng() < HARBOR.chance) {
+            const a = r01(0, 2 * Math.PI);
+            isl.harbor = { a, cr: coastRadius(isl, a), cd: 0 };
+        }
+        // Big islands may have an airstrip along their long axis
+        if (r > 1100 && rng() < AIRSTRIP.chance) isl.airstrip = { a: rot, len: Math.min(AIRSTRIP.len, r * 0.45) };
         list.push(isl);
         n++;
     }
@@ -447,7 +458,8 @@ function setPointer(x, y) {
 
 // ---------- phone controls: steering wheel, throttle lever, auto-aim ----------
 const WHEEL_MAX = 135;        // wheel degrees for full rudder
-let wheelAngle = 0, autoAim = false, fireHeld = false;
+const AIM_SNAP = 90;          // touch aim snaps onto an enemy within this many screen pixels
+let wheelAngle = 0, autoAim = false, fireHeld = false, touchAim = false;
 
 function bindTouchControls() {
     const wheel = document.getElementById('wheel');
@@ -490,7 +502,9 @@ function bindTouchControls() {
             const f = clamp((t.clientY - r.top) / r.height, 0, 1);
             let v = f <= 2 / 3 ? 1 - f * 1.5 : -(f - 2 / 3) * 1.5;
             if (Math.abs(v) < 0.06) v = 0;
-            if (player && !player.dead) player.throttle = v;
+            // Flying: the lever sets the aircraft's power (0..100%)
+            if (flying) flying.thr = clamp(v, 0, 1);
+            else if (player && !player.dead) player.throttle = v;
         };
         const on = e => { e.preventDefault(); setFrom(e.targetTouches[0] || e.changedTouches[0]); };
         thr.addEventListener('touchstart', on, { passive: false });
@@ -520,7 +534,7 @@ function updateTouchUi() {
     if (rim) rim.style.transform = `rotate(${wheelAngle}deg)`;
     const knob = document.getElementById('thrKnob');
     if (knob && player) {
-        const t = player.throttle;
+        const t = flying ? flying.thr : player.throttle;
         knob.style.top = (t >= 0 ? (1 - t) / 1.5 : 2 / 3 + -t / 1.5) * 100 + '%';
         const lbl = document.getElementById('thrLabel');
         if (lbl) lbl.textContent = Math.round(t * 100) + '%';
@@ -542,7 +556,7 @@ function bindInput() {
         mouse.down = false;
     });
 
-    canvas.addEventListener('mousemove', e => setPointer(e.clientX, e.clientY));
+    canvas.addEventListener('mousemove', e => { setPointer(e.clientX, e.clientY); touchAim = false; });
     canvas.addEventListener('mousedown', e => {
         setPointer(e.clientX, e.clientY);
         if (e.button === 0) mouse.down = true;
@@ -573,7 +587,7 @@ function bindInput() {
         }
         pinchStart = 0;
         const t = e.targetTouches[0];
-        if (t) { setPointer(t.clientX, t.clientY); mouse.down = true; }
+        if (t) { setPointer(t.clientX, t.clientY); mouse.down = true; touchAim = true; }
         else mouse.down = false;
     };
     for (const ev of ['touchstart', 'touchmove', 'touchend', 'touchcancel'])
@@ -727,13 +741,13 @@ function inView(x, y, margin) {
 // the rest wait outside gun range
 function assignAttackers() {
     const alive = enemies.filter(e => !e.dead);
-    const score = e => Math.hypot(e.x - player.x, e.y - player.y) - (e.ai.engaged ? 600 : 0);
+    const score = e => e.boss ? -1e9 : Math.hypot(e.x - player.x, e.y - player.y) - (e.ai.engaged ? 600 : 0);
     alive.sort((a, b) => score(a) - score(b));
     alive.forEach((e, i) => { e.ai.engaged = i < MAX_ATTACKERS; });
 }
 
-function spawnEnemy() {
-    const st = enemyStats();
+function spawnEnemy(stOverride) {
+    const st = stOverride || enemyStats();
     const px = player ? player.x : 0, py = player ? player.y : 0;
     // Only outside the screen, never closer than SPAWN_MIN; stays inside despawn range
     const viewR = Math.hypot(vw / 2 / zoom, vh / 2 / zoom);
@@ -745,13 +759,29 @@ function spawnEnemy() {
         const x = px + Math.cos(a) * r, y = py + Math.sin(a) * r;
         if (inView(x, y, st.length + 60)) continue;
         if (onIsland(x, y, 200)) continue;
-        enemies.push(makeShip(st, x, y, Math.atan2(py - y, px - x), true));
-        return;
+        const ship = makeShip(st, x, y, Math.atan2(py - y, px - x), true);
+        enemies.push(ship);
+        return ship;
     }
+    return null;
 }
 
 // ---------- main loop ----------
+let loopErrors = 0;
+
 function loop(ts) {
+    // Schedule the next frame first: an error in one frame must never stop the game
+    requestAnimationFrame(loop);
+    try {
+        frame(ts);
+    } catch (err) {
+        // Log (a few times) and reset the canvas state so the next frame draws cleanly
+        if (loopErrors++ < 5) console.error('warshipBattle frame error:', err);
+        try { if (ctx.reset) ctx.reset(); else ctx.setTransform(1, 0, 0, 1, 0, 0); } catch { }
+    }
+}
+
+function frame(ts) {
     const dt = Math.min(0.05, (ts - last) / 1000 || 0);
     last = ts;
     time += dt;
@@ -772,7 +802,6 @@ function loop(ts) {
     updateEngineSound();
     render();
     updateTouchUi();
-    requestAnimationFrame(loop);
 }
 
 function update(dt) {
@@ -781,7 +810,10 @@ function update(dt) {
     const active = state === 'playing';
 
     if (player) {
-        if (active && !player.dead) controlPlayer(dt);
+        if (active && !player.dead) {
+            if (flying) { player.throttle = 0; controlPlane(dt); }
+            else controlPlayer(dt);
+        }
         updateShip(player, dt);
     }
     if (player) assignAttackers();
@@ -797,6 +829,7 @@ function update(dt) {
     updateMissiles(dt);
     updateJets(dt);
     updateMines(dt);
+    if (player) updateExtras(dt, active);
     updateParticles(dt);
     enemies = enemies.filter(e => !(e.dead && e.sink > 4));
 
@@ -810,11 +843,16 @@ function update(dt) {
         }
     }
 
-    if (player && player.dead && active && player.sink > 2.5) setState('gameover');
+    if (player && player.dead && active && player.sink > 2.5) {
+        saveScore();
+        setState('gameover');
+    }
 
     if (player) {
-        cam.x += (player.x - cam.x) * Math.min(1, dt * 5);
-        cam.y += (player.y - cam.y) * Math.min(1, dt * 5);
+        // Camera follows your own aircraft while flying
+        const tgt = flying || player;
+        cam.x += (tgt.x - cam.x) * Math.min(1, dt * 5);
+        cam.y += (tgt.y - cam.y) * Math.min(1, dt * 5);
     }
     pruneChunks();
 
@@ -830,15 +868,38 @@ function controlPlayer(dt) {
     if (up) player.throttle = Math.min(1, player.throttle + dt * 0.8);
     if (down) player.throttle = Math.max(-0.5, player.throttle - dt * 0.8);
     if (keys.KeyX) player.throttle = 0;
-    if (keys.KeyR && player.repairCd <= 0 && player.repair <= 0 && player.hp < player.maxHp) {
+    if (keys.KeyR && player.repairCd <= 0 && player.repair <= 0 && (player.hp < player.maxHp || hasPartDamage(player))) {
         player.repair = REPAIR_TIME;
         player.repairCd = REPAIR_COOLDOWN;
+        // Emergency repair also fixes knocked-out turrets, fire and engine
+        fixPartDamage(player);
         report(true);
     }
+    // Depth charges (G / 💣)
+    if (keys.KeyG && depthCd <= 0) dropDepthCharges();
+    // Take off with your own aircraft from a nearby airstrip (T / ✈)
+    const tNow = !!keys.KeyT;
+    if (tNow && !tLatch) tryTakeOff();
+    tLatch = tNow;
     const left = keys.KeyA || keys.ArrowLeft, right = keys.KeyD || keys.ArrowRight;
     // Keys steer directly; otherwise the touch wheel position sets the rudder
     const rudderTarget = left || right ? (right ? 1 : 0) - (left ? 1 : 0) : wheelAngle / WHEEL_MAX;
     player.rudder = approach(player.rudder, rudderTarget, dt * 2.5);
+
+    // Touch aim assist: aiming near an enemy (aircraft first) locks exactly onto it (with lead) and follows it
+    if (touchAim) {
+        const pl = nearestPlane(mouse.x, mouse.y, AIM_SNAP / zoom);
+        const e = pl ? null : nearestEnemy(mouse.x, mouse.y, AIM_SNAP / zoom);
+        if (pl) {
+            const t = Math.hypot(pl.x - player.x, pl.y - player.y) / (player.st.shellSpeed || 500);
+            mouse.x = pl.x + Math.cos(pl.a) * PLANE.speed * t;
+            mouse.y = pl.y + Math.sin(pl.a) * PLANE.speed * t;
+        } else if (e) {
+            const t = Math.hypot(e.x - player.x, e.y - player.y) / (player.st.shellSpeed || 500);
+            mouse.x = e.x + Math.cos(e.heading) * e.speed * t;
+            mouse.y = e.y + Math.sin(e.heading) * e.speed * t;
+        }
+    }
 
     // Auto-aim: lock on the nearest enemy in range, lead the target and keep firing
     let autoFire = false;
@@ -1036,7 +1097,7 @@ function updateShip(s, dt) {
             addParticle({ kind: 'foam', x: p.x, y: p.y, vx: 0, vy: 0, max: 2, size: 3, grow: 6, alpha: 0.6 });
         }
     } else {
-        const target = s.throttle * st.speed * (s.throttle < 0 ? 0.5 : 1) * (st.hover && s.onLand ? HOVER.land : 1);
+        const target = s.throttle * st.speed * (s.throttle < 0 ? 0.5 : 1) * (st.hover && s.onLand ? HOVER.land : 1) * (s.engineHit ? 0.5 : 1);
         s.speed = approach(s.speed, target, st.accel * dt);
         // Rudder needs water flow: weak at low speed
         const eff = clamp(Math.abs(s.speed) / (st.speed * 0.35), 0.15, 1);
@@ -1161,9 +1222,10 @@ function fireTurrets(s, tx, ty) {
     const st = s.st;
     if (s.stunT > 0) return;
     for (const t of s.turrets) {
-        if (t.reload > 0 || t.err > 2 * DEG || t.blocked) continue;
+        if (t.reload > 0 || t.err > 2 * DEG || t.blocked || t.broken) continue;
         const p = turretPos(s, t);
-        const a = s.heading + t.rel + rand(-st.spread, st.spread) * DEG;
+        // Knocked-out radar (flagship) ruins the fire control
+        const a = s.heading + t.rel + rand(-st.spread, st.spread) * (s.radarDead ? 3 : 1) * DEG;
         const dist = clamp(Math.hypot(tx - p.x, ty - p.y), 80, st.range) * rand(0.97, 1.03);
         const tw = turretWidth(st);
         const mx = p.x + Math.cos(a) * tw * 0.8, my = p.y + Math.sin(a) * tw * 0.8;
@@ -1249,6 +1311,8 @@ function enemyAI(e, dt) {
     if (hidden || !e.ai.engaged) return;
     // Only fire when visible on the player's screen (no shots from off-screen)
     if (!inView(e.x, e.y, 0)) return;
+    // Night / fog: no firing beyond visual range
+    if (d > envVisibility()) return;
 
     // Lead the target
     const flight = d / st.shellSpeed;
@@ -1313,6 +1377,12 @@ function updateShells(dt) {
             sh.y += sh.dy * step;
             sh.left -= step;
             travel -= step;
+            // Player fire can bring down enemy aircraft (aim at them!)
+            if (!sh.enemy && !sh.torp) {
+                // Plane guns get a bigger hit radius: dogfights against enemy aircraft
+                const pl = planeAt(sh.x, sh.y, sh.fromPlane ? 34 : 22);
+                if (pl) { hitPlane(pl, sh.dmg); burst(sh.x, sh.y, 4, 'spark', 80, 0.3, 3); sh.done = true; break; }
+            }
             const hit = hitShip(sh);
             if (hit) {
                 damage(hit, sh.dmg);
@@ -1350,7 +1420,7 @@ function pickJetTarget(j, c) {
     const falling = new Set(bombs.map(b => b.target));   // already doomed by a falling bomb
     let best = null, bs = -Infinity;
     for (const e of enemies) {
-        if (e.dead || falling.has(e)) continue;
+        if (e.dead || falling.has(e) || e.st.sub) continue;
         const score = Math.hypot(e.x - c.x, e.y - c.y) - (taken.has(e) ? 5000 : 0);
         if (score > bs) { bs = score; best = e; }
     }
@@ -1416,10 +1486,11 @@ function drawLaunchers(s) {
     }
 }
 
-function nearestEnemy(x, y, maxDist) {
+function nearestEnemy(x, y, maxDist, withSubs = false) {
     let best = null, bd = maxDist;
     for (const e of enemies) {
-        if (e.dead) continue;
+        // Submerged subs are not valid gun/missile targets
+        if (e.dead || (e.st.sub && !withSubs)) continue;
         const d = Math.hypot(e.x - x, e.y - y);
         if (d < bd) { bd = d; best = e; }
     }
@@ -1707,7 +1778,8 @@ function updateJets(dt) {
         }
         hit = hit || hitShip({ x: b.tx, y: b.ty, enemy: false });
         if (hit) {
-            damage(hit, hit.hp + 1);
+            // Sinks any ship outright, except the flagship: a bomb costs it only part of its armour
+            damage(hit, hit.boss ? hit.maxHp * BOSS.jetBomb : hit.hp + 1);
             explosion(b.tx, b.ty, false);
             burst(b.tx, b.ty, 4, 'fire', 30, 0.8, 7);
         } else {
@@ -1817,62 +1889,23 @@ function jetPath(g) {
     g.closePath();
 }
 
-function drawJetBody(scale, burner) {
-    ctx.scale(scale, scale);
-    if (burner) {
-        ctx.globalCompositeOperation = 'lighter';
-        const fl = 5 + Math.random() * 3;
-        ctx.drawImage(tex.soft.fire, -11 - fl * 1.6, -fl / 2, fl * 1.8, fl);
-        ctx.globalCompositeOperation = 'source-over';
-    }
-    jetPath(ctx);
-    const g = ctx.createLinearGradient(0, -10, 0, 10);
-    g.addColorStop(0, '#b4bcc4');
-    g.addColorStop(0.5, '#8c959e');
-    g.addColorStop(1, '#5b636b');
-    ctx.fillStyle = g;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,.45)';
-    ctx.lineWidth = 0.5;
-    ctx.stroke();
-    // Canopy
-    ctx.fillStyle = '#1b3550';
-    ctx.beginPath();
-    ctx.ellipse(4.5, 0, 2.6, 1, 0, 0, 2 * Math.PI);
-    ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,.35)';
-    ctx.beginPath();
-    ctx.ellipse(5, -0.3, 1.2, 0.35, 0, 0, 2 * Math.PI);
-    ctx.fill();
-}
+// Carrier's own strike jets: same detailed model as the player's aircraft, a bit larger
+const DECK_JET = { id: 'deck-jet', name: 'Straaljager', length: 28, span: 25, color: '#8c959e', jet: true, ord: 'bomb' };
 
 function drawJets() {
     for (const j of jets) {
-        const alt = j.alt;
-        const scale = lerp(0.7, 1.3, alt);   // higher = closer to the camera
-        const off = 2 + 36 * alt;
-        // Ground shadow; converges with the jet on the deck
-        ctx.save();
-        ctx.translate(j.x + SUN.x * off, j.y + SUN.y * off);
-        ctx.rotate(j.a);
-        ctx.scale(scale, scale);
-        jetPath(ctx);
-        ctx.fillStyle = `rgba(0,10,20,${0.35 - alt * 0.1})`;
-        ctx.fill();
-        ctx.restore();
-
+        drawPlane(DECK_JET, j.x, j.y, j.a, j.alt, 1, 1, j.phase !== 'parked');
+        // Remaining bombs: one under the fuselage, the rest under the wings
         ctx.save();
         ctx.translate(j.x, j.y);
         ctx.rotate(j.a);
-        const burner = AIR_PHASES.includes(j.phase) || (j.phase === 'cat' && j.deckV > 0);
-        drawJetBody(scale, burner);
-        // Bomb under the fuselage until released
-        // Remaining bombs: one under the fuselage, the rest under the wings
+        const k = (0.85 + 0.15 * j.alt) * DECK_JET.length / 22;
+        ctx.scale(k, k);
         ctx.fillStyle = '#2a2d30';
         const slots = [[-2, 0], [-3, -4], [-3, 4], [-4, -7], [-4, 7]];
-        for (let k = 0; k < Math.min(j.bomb || 0, slots.length); k++) {
+        for (let n = 0; n < Math.min(j.bomb || 0, slots.length); n++) {
             ctx.beginPath();
-            ctx.ellipse(slots[k][0], slots[k][1], 2.6, 0.9, 0, 0, 2 * Math.PI);
+            ctx.ellipse(slots[n][0], slots[n][1], 2.6, 0.9, 0, 0, 2 * Math.PI);
             ctx.fill();
         }
         ctx.restore();
@@ -1954,14 +1987,20 @@ function updateMines(dt) {
 }
 
 function hitShip(sh) {
-    const targets = sh.enemy ? (player ? [player] : []) : enemies;
+    // Enemy fire can also hit escorted friendly ships
+    const targets = sh.enemy ? (player ? [player, ...friendlies] : friendlies) : enemies;
     for (const s of targets) {
         if (s.dead) continue;
+        // Submerged submarines: only torpedoes and depth charges reach them
+        if (s.st.sub && !sh.torp) continue;
         const dx = sh.x - s.x, dy = sh.y - s.y;
         const c = Math.cos(s.heading), n = Math.sin(s.heading);
         const lx = dx * c + dy * n, ly = -dx * n + dy * c;
         const hl = s.st.length / 2, hw = s.st.width / 2;
-        if ((lx * lx) / (hl * hl) + (ly * ly) / (hw * hw) <= 1) return s;
+        if ((lx * lx) / (hl * hl) + (ly * ly) / (hw * hw) <= 1) {
+            if (s.boss) bossPartHit(s, sh.x, sh.y, sh.dmg || MISSILE.damage);
+            return s;
+        }
     }
     return null;
 }
@@ -1970,6 +2009,7 @@ function hitShip(sh) {
 function damage(s, dmg, byPlayer = true) {
     // Active armour absorbs most of the damage
     if (s.st.special === 'shield' && s.specialT > 0) dmg *= 1 - SHIELD.reduce;
+    onDamaged(s, dmg);
     s.hp -= dmg;
     if (s.hp <= 0 && !s.dead) {
         s.hp = 0;
@@ -1984,6 +2024,7 @@ function damage(s, dmg, byPlayer = true) {
         if (s.enemy && byPlayer) {
             kills++;
             if (dotnet) dotnet.invokeMethodAsync('OnKill').catch(() => { });
+            onEnemyKilled(s);
         }
     }
     if (s === player || s.dead) report(false);
@@ -2259,9 +2300,11 @@ function setEngine(st) {
 
 // Engine pitch, tone and volume follow the throttle and speed
 function updateEngineSound() {
+    updatePlaneSound();
     if (!audio || !audio.eng) return;
     const e = audio.eng, pr = e.pr, t = audio.ctx.currentTime;
-    const on = player && !player.dead && state === 'playing';
+    // Ship engine falls silent while you fly
+    const on = player && !player.dead && state === 'playing' && !flying;
     const frac = on ? clamp(Math.abs(player.speed) / player.st.speed, 0, 1) : 0;
     const thr = on ? Math.abs(player.throttle) : 0;
     const rpm = clamp(frac * 0.8 + thr * 0.2, 0, 1);
@@ -2587,22 +2630,30 @@ function render() {
     drawParticles(1);
     drawMines();
     drawTorpedoes();
+    drawHarbors(view);
+    drawDepthCharges();
     for (const e of enemies) drawShip(e);
+    for (const f of friendlies) drawShip(f);
     if (player) drawShip(player);
     drawShells();
     drawParticles(2);
     drawMissiles();
     drawBombs();
     drawJets();
+    drawAir();
     drawParticles(3);
 
     drawClouds(view);
-    if (player && !player.dead && state === 'playing') drawAim();
+    if (player && !player.dead && state === 'playing' && !flying) drawAim();
     for (const e of enemies) drawHealthBar(e);
+    for (const f of friendlies) drawHealthBar(f);
+    drawMissionMarker();
 
     ctx.restore();
+    drawEnvironment();
     drawVignette();
     drawMinimap();
+    drawHudOverlay();
 }
 
 // Fills the view with a scrolled, scaled pattern
@@ -3572,7 +3623,7 @@ function drawRadar(s, L, W) {
     ctx.beginPath();
     ctx.arc(0, 0, Math.max(1.6, A * 0.18), 0, 2 * Math.PI);
     ctx.fill();
-    if (!s.dead) s.radarA = s.radarPh + time * RADAR_RPM;
+    if (!s.dead && !s.radarDead) s.radarA = s.radarPh + time * RADAR_RPM;
     ctx.rotate(s.radarA || 0);
     setShadow(1.5, 1.5);
     // Antenna bar with reflector face
@@ -3696,6 +3747,8 @@ function clearShadow() {
 }
 
 function drawShip(s, shadowScale = 1) {
+    // Submarines are drawn submerged, without a ship sprite
+    if (s.st.sub) { drawSub(s); return; }
     const st = s.st, L = st.length, W = st.width, bow = st.bow ?? 0.15;
     const sp = shipSprite(st);
     const frac = clamp(Math.abs(s.speed) / st.speed, 0, 1);
@@ -3728,13 +3781,7 @@ function drawShip(s, shadowScale = 1) {
     if (st.jets && s !== player && !s.dead) {
         for (let i = 0; i < st.jets; i++) {
             const p = spotPose(st, i);
-            ctx.save();
-            ctx.translate(p.x, p.y);
-            ctx.rotate(p.a);
-            setShadow(2, 2);
-            drawJetBody(0.7, false);
-            clearShadow();
-            ctx.restore();
+            drawPlane(DECK_JET, p.x, p.y, p.a, 0, 1, 1, false);
         }
     }
 
@@ -3772,7 +3819,7 @@ function drawShip(s, shadowScale = 1) {
             ctx.fillStyle = '#0d0e0f';
             ctx.fillRect(len - 1.2, y - bw / 2, 1.2, bw);
         }
-        drawGunHouse(turretShape(st), R, st.turret);
+        drawGunHouse(turretShape(st), R, t.broken ? '#2b2826' : st.turret);   // knocked-out turrets are scorched
         // Reload ring for the player
         if (!s.enemy && !s.dead && t.reload > 0) {
             ctx.strokeStyle = 'rgba(255,215,90,.85)';
@@ -3928,7 +3975,7 @@ function drawHealthBar(s) {
     ctx.beginPath();
     ctx.roundRect(bx - 1, by - 1, bw + 2, 7, 3);
     ctx.fill();
-    ctx.fillStyle = f > 0.5 ? '#e0603a' : f > 0.25 ? '#e0402a' : '#c02020';
+    ctx.fillStyle = s.friendly ? '#4ad06a' : f > 0.5 ? '#e0603a' : f > 0.25 ? '#e0402a' : '#c02020';
     ctx.beginPath();
     ctx.roundRect(bx, by, bw * f, 5, 2.5);
     ctx.fill();
@@ -4122,9 +4169,39 @@ function drawMinimap() {
         islandPathOn(mctx, isl, k, (isl.x - ox) * k, (isl.y - oy) * k);
         mctx.fill();
     }
+    // Harbors
+    mctx.fillStyle = '#ffffff';
+    for (const isl of islandsNear(cam.x, cam.y, R + ISLAND_MAX_R)) {
+        if (isl.airstrip) {
+            // Airstrip: short yellow line along the runway
+            const a = isl.airstrip.a, hl = Math.max(4, isl.airstrip.len / 2 * k);
+            mctx.strokeStyle = '#ffd84a';
+            mctx.lineWidth = 2;
+            mctx.beginPath();
+            mctx.moveTo((isl.x - ox) * k - Math.cos(a) * hl, (isl.y - oy) * k - Math.sin(a) * hl);
+            mctx.lineTo((isl.x - ox) * k + Math.cos(a) * hl, (isl.y - oy) * k + Math.sin(a) * hl);
+            mctx.stroke();
+        }
+        if (!isl.harbor) continue;
+        const h = harborTip(isl);
+        mctx.fillRect((h.x - ox) * k - 2.5, (h.y - oy) * k - 2.5, 5, 5);
+    }
+    // Escort and mission destination
+    mctx.fillStyle = '#4ad06a';
+    for (const f of friendlies) if (!f.dead) mctx.fillRect(clamp((f.x - ox) * k, 2, size - 2) - 2, clamp((f.y - oy) * k, 2, size - 2) - 2, 4, 4);
+    if (mission && mission.dest) {
+        mctx.strokeStyle = '#4ad06a';
+        mctx.beginPath();
+        mctx.arc(clamp((mission.dest.x - ox) * k, 4, size - 4), clamp((mission.dest.y - oy) * k, 4, size - 4), 4, 0, 2 * Math.PI);
+        mctx.stroke();
+    }
+    // Aircraft
+    mctx.fillStyle = '#ffd84a';
+    for (const p of planes) if (!p.down) mctx.fillRect(clamp((p.x - ox) * k, 2, size - 2) - 1.5, clamp((p.y - oy) * k, 2, size - 2) - 1.5, 3, 3);
     mctx.fillStyle = '#ff5a4a';
     for (const e of enemies) {
-        if (e.dead) continue;
+        // Submerged submarines do not show on radar
+        if (e.dead || e.st.sub) continue;
         const x = clamp((e.x - ox) * k, 2, size - 2), y = clamp((e.y - oy) * k, 2, size - 2);
         mctx.fillRect(x - 2, y - 2, 4, 4);
     }
@@ -4134,9 +4211,1558 @@ function drawMinimap() {
         mctx.arc((player.x - ox) * k, (player.y - oy) * k, 3, 0, 2 * Math.PI);
         mctx.fill();
     }
+    if (flying) {
+        mctx.fillStyle = '#9fe0ff';
+        mctx.beginPath();
+        mctx.arc((flying.x - ox) * k, (flying.y - oy) * k, 3.5, 0, 2 * Math.PI);
+        mctx.fill();
+    }
+    if (parkedPlane) {
+        // Parked plane, clamped to the radar edge when far away
+        mctx.fillStyle = '#9fe0ff';
+        mctx.fillRect(clamp((parkedPlane.x - ox) * k, 3, size - 3) - 3, clamp((parkedPlane.y - oy) * k, 3, size - 3) - 3, 6, 6);
+    }
+    if (flying && player && !player.dead) {
+        mctx.fillStyle = '#fff';
+        mctx.beginPath();
+        mctx.arc(clamp((player.x - ox) * k, 3, size - 3), clamp((player.y - oy) * k, 3, size - 3), 3, 0, 2 * Math.PI);
+        mctx.fill();
+    }
     // Visible area
     const hw = vw / 2 / zoom * k, hh = vh / 2 / zoom * k;
     mctx.strokeStyle = 'rgba(255,255,255,.5)';
     mctx.lineWidth = 1;
     mctx.strokeRect(size / 2 - hw, size / 2 - hh, hw * 2, hh * 2);
+}
+
+// =====================================================================
+// Extras: partial damage, harbors, missions, flagship boss, aircraft + AA,
+// submarines + depth charges, weather / day-night, medals and high scores
+// =====================================================================
+const PART = { turret: 0.012, fire: 0.008, engine: 0.006, minDmg: 10, fireDps: 2.5, fireTime: 12 };
+const HARBOR = { chance: 0.55, pier: 130, dockDist: 170, dockSpeed: 30, cooldown: 45 };
+const BOSS = { every: 8, hp: 1800, turretHp: 70, radarHp: 90, reward: 10, jetBomb: 0.08 };
+const PLANE = { every: [45, 80], hp: 18, speed: 260, bombDmg: 35, bombR: 75, aaRange: 650, aaRate: 0.12, aaDmg: 2.5, aaHit: 0.55 };
+const DEPTH = { cd: 7, n: 3, fuse: 1.6, radius: 170, damage: 90 };
+const ENV = { min: 70, max: 130, fade: 4, wind: 35 };
+const MEDALS = [
+    { id: 'first', name: 'Eerste overwinning', desc: 'Breng je eerste schip tot zinken' },
+    { id: 'streak10', name: 'Onaantastbaar', desc: '10 kills zonder schade' },
+    { id: 'run20', name: 'Zeeheld', desc: '20 kills in één ronde' },
+    { id: 'kills50', name: 'Veteraan', desc: '50 schepen in totaal' },
+    { id: 'kills250', name: 'Admiraal', desc: '250 schepen in totaal' },
+    { id: 'mission', name: 'Opdracht volbracht', desc: 'Voltooi een missie' },
+    { id: 'convoy', name: 'Escorte', desc: 'Breng een konvooi veilig aan' },
+    { id: 'sub', name: 'Onderzeebootjager', desc: 'Breng een onderzeeër tot zinken' },
+    { id: 'plane', name: 'Luchtafweer', desc: 'Haal een vliegtuig neer' },
+    { id: 'storm', name: 'Stormvast', desc: 'Overleef 60 seconden storm' },
+    { id: 'harbor', name: 'Thuishaven', desc: 'Meer aan in een haven' }
+];
+
+let friendlies = [], planes = [], airBombs = [], depthCharges = [], aaTracers = [];
+let mission = null, missionT = 0, toasts = [], killsSinceBoss = 0, planeTimer = 60, depthCd = 0, aaT = 0;
+let env = { kind: 'clear', prev: 'clear', next: 0, fade: 1, wind: { x: 0, y: 0 } }, lightning = 0, envCanvas = null;
+let runStats = { kills: 0, noDmg: 0, stormT: 0, start: 0 };
+
+function resetExtras() {
+    friendlies = []; planes = []; airBombs = []; depthCharges = []; aaTracers = [];
+    mission = null; missionT = time + 15; toasts = []; killsSinceBoss = 0;
+    planeTimer = rand(40, 70); depthCd = 0; lightning = 0;
+    env = { kind: 'clear', prev: 'clear', next: time + rand(ENV.min, ENV.max) * 0.6, fade: 1, wind: { x: 0, y: 0 } };
+    runStats = { kills: 0, noDmg: 0, stormT: 0, start: time };
+    flying = null; parkedPlane = null; planeCd = 0; playerBombs = []; tLatch = false; eLatch = false;
+}
+
+function toast(text, color = '#ffe08a') {
+    toasts.push({ text, color, t: 4 });
+    if (toasts.length > 4) toasts.shift();
+}
+
+function reward(amount, text) {
+    amount = Math.round(amount);
+    toast(`${text}  +🪙 ${amount}`, '#9fe870');
+    if (dotnet) dotnet.invokeMethodAsync('OnReward', amount).catch(() => { });
+}
+
+// ---------- partial damage (player) ----------
+const hasPartDamage = s => s.fireT > 0 || !!s.engineHit || s.turrets.some(t => t.broken);
+function fixPartDamage(s) {
+    s.fireT = 0;
+    s.engineHit = false;
+    for (const t of s.turrets) t.broken = false;
+}
+
+function onDamaged(s, dmg) {
+    if (s !== player || s.dead || dmg <= 0.5) return;
+    runStats.noDmg = 0;
+    if (dmg < PART.minDmg) return;
+    const r = Math.random();
+    if (r < PART.turret) {
+        const ok = s.turrets.filter(t => !t.broken);
+        if (ok.length > 1) {
+            ok[Math.floor(Math.random() * ok.length)].broken = true;
+            toast('Geschutstoren uitgeschakeld! (R = repareren)', '#ff9a7a');
+        }
+    } else if (r < PART.turret + PART.fire) {
+        if (!(s.fireT > 0)) toast('Brand aan boord! (R = blussen)', '#ff9a7a');
+        s.fireT = PART.fireTime;
+    } else if (r < PART.turret + PART.fire + PART.engine) {
+        if (!s.engineHit) toast('Motor geraakt: halve kracht (R = repareren)', '#ff9a7a');
+        s.engineHit = true;
+    }
+}
+
+function updatePartDamage(s, dt) {
+    if (s.dead) return;
+    if (s.fireT > 0) {
+        s.fireT -= dt;
+        damage(s, PART.fireDps * dt, false);
+        if (Math.random() < dt * 20) {
+            const p = local(s, rand(-s.st.length / 3, s.st.length / 3), rand(-s.st.width / 4, s.st.width / 4));
+            addParticle({ kind: 'fire', x: p.x, y: p.y, vx: rand(-10, 10), vy: rand(-10, 10), max: 0.6, size: 5, grow: 8, alpha: 0.9 });
+            addParticle({ kind: 'smoke', x: p.x, y: p.y, vx: rand(-10, 10), vy: rand(-10, 10), max: 2.2, size: 6, grow: 16, alpha: 0.5 });
+        }
+    }
+    if (s.engineHit && Math.random() < dt * 8) {
+        const p = local(s, -s.st.length * 0.25, 0);
+        addParticle({ kind: 'smoke', x: p.x, y: p.y, vx: rand(-8, 8), vy: rand(-8, 8), max: 2.5, size: 6, grow: 18, alpha: 0.6 });
+    }
+    for (const t of s.turrets) {
+        if (t.broken && Math.random() < dt * 4) {
+            const p = turretPos(s, t);
+            addParticle({ kind: 'smoke', x: p.x, y: p.y, vx: rand(-6, 6), vy: rand(-6, 6), max: 1.8, size: 4, grow: 12, alpha: 0.5 });
+        }
+    }
+}
+
+// ---------- harbors ----------
+function harborTip(isl) {
+    const h = isl.harbor, d = h.cr + HARBOR.pier;
+    return { x: isl.x + Math.cos(h.a) * d, y: isl.y + Math.sin(h.a) * d };
+}
+
+function updateHarbors() {
+    if (player.dead) return;
+    for (const isl of islandsNear(player.x, player.y, ISLAND_MAX_R + 400)) {
+        if (!isl.harbor || time < isl.harbor.cd) continue;
+        const tip = harborTip(isl);
+        if (Math.hypot(player.x - tip.x, player.y - tip.y) > HARBOR.dockDist || Math.abs(player.speed) > HARBOR.dockSpeed) continue;
+        // Docked: free full repair, resupply and maybe a new mission
+        isl.harbor.cd = time + HARBOR.cooldown;
+        player.hp = player.maxHp;
+        player.repair = 0;
+        fixPartDamage(player);
+        player.specialCd = 0;
+        depthCd = 0;
+        toast('⚓ Haven: gerepareerd en bevoorraad');
+        unlockMedal('harbor');
+        if (!mission) newMission(isl);
+        report(true);
+    }
+}
+
+function drawHarbors(view) {
+    for (const isl of islandsNear(cam.x, cam.y, Math.max(view.x1 - view.x0, view.y1 - view.y0) / 2 + ISLAND_MAX_R)) {
+        if (isl.airstrip) drawAirstrip(isl);
+        const h = isl.harbor;
+        if (!h) continue;
+        const bx = isl.x + Math.cos(h.a) * h.cr, by = isl.y + Math.sin(h.a) * h.cr;
+        if (bx < view.x0 - 300 || bx > view.x1 + 300 || by < view.y0 - 300 || by > view.y1 + 300) continue;
+        ctx.save();
+        ctx.translate(bx, by);
+        ctx.rotate(h.a);
+        // Pier: planks on posts
+        ctx.fillStyle = 'rgba(0,0,0,.25)';
+        ctx.fillRect(-20 + 4, -11 + 4, HARBOR.pier + 20, 22);
+        ctx.fillStyle = '#8a6a44';
+        ctx.fillRect(-20, -11, HARBOR.pier + 20, 22);
+        ctx.strokeStyle = 'rgba(40,25,10,.45)';
+        ctx.lineWidth = 1;
+        for (let x = -16; x < HARBOR.pier; x += 7) { ctx.beginPath(); ctx.moveTo(x, -11); ctx.lineTo(x, 11); ctx.stroke(); }
+        ctx.fillStyle = '#3e2c1a';
+        for (let x = 0; x <= HARBOR.pier; x += 26) { ctx.fillRect(x - 2, -14, 4, 4); ctx.fillRect(x - 2, 10, 4, 4); }
+        // Warehouse and crane on land
+        ctx.fillStyle = 'rgba(0,0,0,.3)';
+        ctx.fillRect(-92, -26, 60, 48);
+        ctx.fillStyle = '#a8443a';
+        ctx.fillRect(-96, -30, 60, 48);
+        ctx.fillStyle = 'rgba(255,255,255,.15)';
+        ctx.fillRect(-96, -30, 60, 6);
+        ctx.strokeStyle = '#e0b030';
+        ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(-20, 18); ctx.lineTo(30, 18); ctx.stroke();
+        // Beacon at the pier head: green = ready to dock
+        const ready = time >= h.cd;
+        ctx.fillStyle = ready ? '#5af07a' : '#f0a040';
+        ctx.beginPath();
+        ctx.arc(HARBOR.pier, 0, 5 + Math.sin(time * 4) * 1.2, 0, 2 * Math.PI);
+        ctx.fill();
+        if (ready) {
+            ctx.strokeStyle = 'rgba(90,240,122,.35)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(HARBOR.pier, 0, HARBOR.dockDist * 0.6, 0, 2 * Math.PI);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+}
+
+// ---------- missions ----------
+const MERCHANT = { name: 'Vrachtschip', hp: 260, speed: 58, accel: 12, turn: 20, turretTurn: 0, reload: 99, damage: 0, shellSpeed: 400, range: 1, spread: 1, length: 130, width: 26, turrets: 0, barrels: 1, bow: 0.2, style: 'fregat', hull: '#38584a', deck: '#a08a64', turret: '#333' };
+
+// fromIsl: the harbor island where the mission is picked up (escorts only start at a harbor)
+function newMission(fromIsl = null) {
+    const r = Math.random(), base = (diff && diff.reward) || 1000;
+    // Escort: from this harbor to a harbor on another island
+    const targets = fromIsl ? islandsNear(player.x, player.y, 9000).filter(i => i !== fromIsl && i.harbor && Math.hypot(i.x - fromIsl.x, i.y - fromIsl.y) > 2500) : [];
+    if (targets.length && r < 0.5) {
+        const to = targets[Math.floor(Math.random() * targets.length)];
+        const from = harborTip(fromIsl), dest = harborTip(to);
+        const out = { x: Math.cos(fromIsl.harbor.a), y: Math.sin(fromIsl.harbor.a) };
+        const sx = from.x + out.x * 160, sy = from.y + out.y * 160;
+        const ship = makeShip(MERCHANT, sx, sy, Math.atan2(out.y, out.x), false);
+        ship.friendly = true;
+        friendlies.push(ship);
+        mission = { type: 'escort', ship, dest, until: time + 360, reward: base * 5 };
+    } else if (r < 0.75) {
+        const need = 3 + Math.floor(Math.random() * 4);
+        mission = { type: 'kill', need, got: 0, until: time + 60 + need * 40, reward: base * need * 0.8 };
+    } else {
+        mission = { type: 'planes', need: 3, got: 0, until: time + 240, reward: base * 2.5 };
+        planeTimer = Math.min(planeTimer, 6);
+    }
+    toast('📜 Nieuwe missie: ' + missionText(), '#8ad0ff');
+}
+
+function missionText() {
+    if (!mission) return '';
+    const left = Math.max(0, Math.ceil(mission.until - time));
+    switch (mission.type) {
+        case 'kill': return `vernietig ${mission.got}/${mission.need} schepen (${left}s)`;
+        case 'planes': return `haal ${mission.got}/${mission.need} vliegtuigen neer (${left}s)`;
+        case 'escort': return `escorteer het vrachtschip naar de haven bij de groene markering (${left}s)`;
+    }
+    return '';
+}
+
+function endMission(ok) {
+    if (!mission) return;
+    if (ok) {
+        reward(mission.reward, '✔ Missie voltooid');
+        unlockMedal('mission');
+        if (mission.type === 'escort') unlockMedal('convoy');
+    } else toast('✖ Missie mislukt', '#ff8a7a');
+    if (mission.ship) mission.ship.leaving = true;
+    mission = null;
+    missionT = time + 40;
+}
+
+function updateMission(dt) {
+    if (!mission) {
+        if (time > missionT) newMission();
+        return;
+    }
+    if (time > mission.until) { endMission(false); return; }
+    if ((mission.type === 'kill' || mission.type === 'planes') && mission.got >= mission.need) endMission(true);
+    else if (mission.type === 'escort') {
+        const s = mission.ship;
+        if (s.dead) endMission(false);
+        else if (Math.hypot(s.x - mission.dest.x, s.y - mission.dest.y) < 260) endMission(true);
+    }
+}
+
+// Friendly ships steer around islands towards their destination
+function updateFriendlies(dt) {
+    for (const f of friendlies) {
+        if (!f.dead) {
+            const dest = mission && mission.ship === f ? mission.dest : { x: f.x + Math.cos(f.heading) * 1000, y: f.y + Math.sin(f.heading) * 1000 };
+            const want = Math.atan2(dest.y - f.y, dest.x - f.x);
+            let h = want;
+            for (const off of [0, 25, -25, 50, -50, 80, -80, 120, -120]) {
+                if (pathClear(f, want + off * DEG, 500)) { h = want + off * DEG; break; }
+            }
+            f.rudder = clamp(norm(h - f.heading) / (30 * DEG), -1, 1);
+            f.throttle = 0.8;
+        }
+        updateShip(f, dt);
+    }
+    friendlies = friendlies.filter(f => !(f.dead && f.sink > 4) && !(f.leaving && Math.hypot(f.x - player.x, f.y - player.y) > despawnDist()));
+}
+
+function drawMissionMarker() {
+    if (!mission || !mission.dest) return;
+    const d = mission.dest;
+    ctx.strokeStyle = 'rgba(74,208,106,.8)';
+    ctx.lineWidth = 4;
+    ctx.setLineDash([16, 12]);
+    ctx.beginPath();
+    ctx.arc(d.x, d.y, 260, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.setLineDash([]);
+}
+
+// ---------- flagship boss ----------
+// Hits near a turret or the radar damage that part as well
+function bossPartHit(s, x, y, dmg) {
+    const tw = turretWidth(s.st);
+    for (const t of s.turrets) {
+        if (t.broken) continue;
+        const p = turretPos(s, t);
+        if (Math.hypot(p.x - x, p.y - y) > tw * 0.9) continue;
+        t.hp -= dmg;
+        if (t.hp <= 0) {
+            t.broken = true;
+            explosion(p.x, p.y, false);
+            toast('💥 Toren van het vlaggenschip vernietigd');
+        }
+        return;
+    }
+    if (!s.radarDead) {
+        const [rx, ry] = radarPos(s.st, s.st.length, s.st.width);
+        const rp = local(s, rx, ry);
+        if (Math.hypot(rp.x - x, rp.y - y) < 22) {
+            s.radarHp -= dmg;
+            if (s.radarHp <= 0) {
+                s.radarDead = true;
+                explosion(rp.x, rp.y, false);
+                toast('📡 Radar van het vlaggenschip uit: hij schiet veel slechter');
+            }
+        }
+    }
+}
+
+function onEnemyKilled(s) {
+    runStats.kills++;
+    runStats.noDmg++;
+    killsSinceBoss++;
+    let total = 0;
+    try { total = (+localStorage.getItem('wb-total-kills') || 0) + 1; localStorage.setItem('wb-total-kills', total); } catch { }
+    unlockMedal('first');
+    if (runStats.noDmg >= 10) unlockMedal('streak10');
+    if (runStats.kills >= 20) unlockMedal('run20');
+    if (total >= 50) unlockMedal('kills50');
+    if (total >= 250) unlockMedal('kills250');
+    if (s.st.sub) unlockMedal('sub');
+    if (s.boss) {
+        reward(diff.reward * BOSS.reward, '🏆 Vlaggenschip tot zinken gebracht!');
+        unlockMedal('boss');
+    }
+    if (mission && mission.type === 'kill') mission.got++;
+}
+
+// ---------- aircraft and anti-aircraft ----------
+function spawnPlanes() {
+    const n = 2 + (Math.random() < 0.4 ? 1 : 0);
+    const viewR = Math.hypot(vw / 2 / zoom, vh / 2 / zoom);
+    const a = spawnFront + rand(-SPAWN_SPREAD, SPAWN_SPREAD) * DEG;
+    const cx = player.x + Math.cos(a) * (viewR + 500), cy = player.y + Math.sin(a) * (viewR + 500);
+    const h = a + Math.PI;
+    for (let i = 0; i < n; i++) {
+        const side = (i - (n - 1) / 2) * 60;
+        planes.push({ x: cx - Math.sin(h) * side - Math.cos(h) * Math.abs(side), y: cy + Math.cos(h) * side - Math.sin(h) * Math.abs(side), a: h, hp: PLANE.hp, bombed: false, down: 0 });
+    }
+    playSound('jet', cx, cy, 1);
+    toast('✈ Vijandelijke bommenwerpers!', '#ffd84a');
+}
+
+function updateAir(dt) {
+    planeTimer -= dt;
+    if (planeTimer <= 0 && !player.dead) {
+        spawnPlanes();
+        planeTimer = rand(PLANE.every[0], PLANE.every[1]);
+    }
+    for (const p of planes) {
+        if (p.down > 0) {
+            // Shot down: spiral into the sea
+            p.down -= dt;
+            p.a += dt * 4;
+            p.x += Math.cos(p.a) * PLANE.speed * 0.5 * dt;
+            p.y += Math.sin(p.a) * PLANE.speed * 0.5 * dt;
+            if (Math.random() < dt * 30) addParticle({ kind: 'smoke', x: p.x, y: p.y, vx: 0, vy: 0, max: 1.5, size: 5, grow: 14, alpha: 0.6 });
+            if (p.down <= 0) { waterColumn(p.x, p.y, 1.2); playSound('splash', p.x, p.y, 1); p.gone = true; }
+            continue;
+        }
+        if (!p.bombed) {
+            // Home in on the player, release the bomb when overhead
+            const want = Math.atan2(player.y - p.y, player.x - p.x);
+            p.a += clamp(norm(want - p.a), -1.2 * dt, 1.2 * dt);
+            if (Math.hypot(player.x - p.x, player.y - p.y) < 70) {
+                p.bombed = true;
+                airBombs.push({ x: p.x, y: p.y, vx: Math.cos(p.a) * 60, vy: Math.sin(p.a) * 60, t: 1.2 });
+            }
+        }
+        p.x += Math.cos(p.a) * PLANE.speed * dt;
+        p.y += Math.sin(p.a) * PLANE.speed * dt;
+        if (p.bombed && Math.hypot(p.x - player.x, p.y - player.y) > despawnDist()) p.gone = true;
+    }
+    planes = planes.filter(p => !p.gone);
+
+    for (const b of airBombs) {
+        b.t -= dt;
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+        if (b.t <= 0) {
+            explosion(b.x, b.y, true);
+            if (!onIsland(b.x, b.y)) waterColumn(b.x, b.y, 1.4);
+            for (const s of [player, ...friendlies]) {
+                if (!s.dead && Math.hypot(s.x - b.x, s.y - b.y) < PLANE.bombR + s.st.width / 2) damage(s, PLANE.bombDmg * diff.enemyDamage, false);
+            }
+        }
+    }
+    airBombs = airBombs.filter(b => b.t > 0);
+    for (const t of aaTracers) t.t -= dt;
+    aaTracers = aaTracers.filter(t => t.t > 0);
+}
+
+// Enemy aircraft hit by player fire (shells, machine guns, own plane)
+function planeAt(x, y, r) {
+    for (const p of planes) if (!p.down && Math.hypot(p.x - x, p.y - y) < r) return p;
+    return null;
+}
+
+function nearestPlane(x, y, maxDist) {
+    let best = null, bd = maxDist;
+    for (const p of planes) {
+        if (p.down) continue;
+        const d = Math.hypot(p.x - x, p.y - y);
+        if (d < bd) { bd = d; best = p; }
+    }
+    return best;
+}
+
+function hitPlane(p, dmg) {
+    if (p.down) return;
+    p.hp -= dmg;
+    if (p.hp > 0) return;
+    p.down = 1.6;
+    explosion(p.x, p.y, false);
+    reward(diff.reward * 0.5, '✈ Vliegtuig neergehaald');
+    unlockMedal('plane');
+    if (mission && mission.type === 'planes') mission.got++;
+}
+
+function drawAir() {
+    // AA tracers
+    ctx.strokeStyle = 'rgba(255,220,120,.85)';
+    ctx.lineWidth = 1.5;
+    for (const t of aaTracers) { ctx.beginPath(); ctx.moveTo(t.x0, t.y0); ctx.lineTo(t.x1, t.y1); ctx.stroke(); }
+    // Falling bombs: shrinking dark dot with a target ring
+    for (const b of airBombs) {
+        ctx.strokeStyle = 'rgba(255,80,60,.6)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(b.x + b.vx * b.t, b.y + b.vy * b.t, PLANE.bombR * (0.4 + 0.6 * b.t / 1.2), 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.fillStyle = '#222';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 2 + b.t * 3, 0, 2 * Math.PI);
+        ctx.fill();
+    }
+    for (const p of planes) {
+        // Shot-down planes shrink as they spiral into the sea
+        const sc = p.down > 0 ? 0.6 + p.down * 0.25 : 1;
+        drawPlane(ENEMY_PLANE, p.x, p.y, p.a, p.down > 0 ? p.down / 1.6 : 1, sc);
+    }
+    drawPlayerPlane();
+}
+
+function planePath() {
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(10, -2.5); ctx.lineTo(2, -3); ctx.lineTo(1, -22); ctx.lineTo(-5, -22); ctx.lineTo(-5, -3);
+    ctx.lineTo(-14, -2.5); ctx.lineTo(-16, -8); ctx.lineTo(-19, -8); ctx.lineTo(-18, 0);
+    ctx.lineTo(-19, 8); ctx.lineTo(-16, 8); ctx.lineTo(-14, 2.5); ctx.lineTo(-5, 3);
+    ctx.lineTo(-5, 22); ctx.lineTo(1, 22); ctx.lineTo(2, 3); ctx.lineTo(10, 2.5);
+    ctx.closePath();
+}
+
+// ---------- submarines and depth charges ----------
+function drawSub(s) {
+    const L = s.st.length, W = s.st.width;
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    ctx.rotate(s.heading);
+    ctx.globalAlpha = s.dead ? clamp(0.5 - s.sink / 6, 0, 0.5) : 0.5;
+    ctx.fillStyle = s.st.hull;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, L / 2, W / 2, 0, 0, 2 * Math.PI);
+    ctx.fill();
+    // Conning tower and periscope wake
+    ctx.globalAlpha = s.dead ? 0 : 0.8;
+    ctx.fillStyle = s.st.deck;
+    ctx.beginPath();
+    ctx.roundRect(L * 0.02, -W * 0.22, L * 0.18, W * 0.44, 3);
+    ctx.fill();
+    ctx.restore();
+    if (!s.dead && Math.random() < 0.3) {
+        const p = local(s, L * 0.12, 0);
+        addParticle({ kind: 'foam', x: p.x, y: p.y, vx: 0, vy: 0, max: 1.4, size: 3, grow: 8, alpha: 0.5 });
+    }
+}
+
+function dropDepthCharges() {
+    depthCd = DEPTH.cd;
+    for (let i = 0; i < DEPTH.n; i++) {
+        const p = local(player, -player.st.length * 0.55 - i * 16, (i - (DEPTH.n - 1) / 2) * 24);
+        depthCharges.push({ x: p.x, y: p.y, t: DEPTH.fuse + i * 0.25 });
+        addParticle({ kind: 'water', x: p.x, y: p.y, vx: 0, vy: 0, max: 0.6, size: 4, grow: 14, alpha: 0.7 });
+    }
+    playSound('splash', player.x, player.y, 0.8);
+}
+
+function updateDepthCharges(dt) {
+    depthCd = Math.max(0, depthCd - dt);
+    for (const c of depthCharges) {
+        c.t -= dt;
+        if (c.t > 0) continue;
+        waterColumn(c.x, c.y, 2.2);
+        addParticle({ kind: 'ring', x: c.x, y: c.y, vx: 0, vy: 0, max: 0.8, size: 10, grow: DEPTH.radius * 1.5, alpha: 0.7 });
+        playSound('boom', c.x, c.y, 0.8);
+        for (const e of enemies) {
+            if (e.dead) continue;
+            const d = Math.hypot(e.x - c.x, e.y - c.y);
+            if (d < DEPTH.radius + e.st.width / 2) damage(e, DEPTH.damage * (1 - 0.5 * d / DEPTH.radius));
+        }
+    }
+    depthCharges = depthCharges.filter(c => c.t > 0);
+}
+
+function drawDepthCharges() {
+    for (const c of depthCharges) {
+        ctx.globalAlpha = clamp(c.t / DEPTH.fuse, 0.15, 0.9);
+        ctx.fillStyle = '#2a2e30';
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 4, 0, 2 * Math.PI);
+        ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+}
+
+// ---------- weather and day/night ----------
+const envLevel = k => (env.kind === k ? env.fade : 0) + (env.prev === k ? 1 - env.fade : 0);
+
+// Distance at which enemies can see (and shoot) the player
+function envVisibility() {
+    let v = Infinity;
+    if (envLevel('night') > 0.5) v = 1100;
+    if (envLevel('fog') > 0.5) v = Math.min(v, 800);
+    return v;
+}
+
+function updateEnvironment(dt) {
+    if (time >= env.next) {
+        const opts = ['clear', 'clear', 'night', 'fog', 'storm'].filter(k => k !== env.kind);
+        env.prev = env.kind;
+        env.kind = opts[Math.floor(Math.random() * opts.length)];
+        env.fade = 0;
+        env.next = time + rand(ENV.min, ENV.max);
+        const a = rand(0, 2 * Math.PI);
+        env.wind = { x: Math.cos(a) * ENV.wind, y: Math.sin(a) * ENV.wind };
+        const names = { clear: '☀ Het weer klaart op', night: '🌙 De nacht valt: zichtbaarheid beperkt', fog: '🌫 Dichte mist: vertrouw op je radar', storm: '⛈ Storm! Wind en hoge golven' };
+        toast(names[env.kind], '#cfe0ff');
+    }
+    env.fade = Math.min(1, env.fade + dt / ENV.fade);
+    const storm = envLevel('storm');
+    if (storm > 0) {
+        // Wind drift on all ships
+        for (const s of [player, ...enemies, ...friendlies]) {
+            if (s.dead) continue;
+            s.x += env.wind.x * storm * dt;
+            s.y += env.wind.y * storm * dt;
+        }
+        if (Math.random() < dt * 0.12 * storm) {
+            lightning = 0.35;
+            playSound('boom', cam.x + rand(-2000, 2000), cam.y + rand(-2000, 2000), 1.5);
+        }
+        if (storm > 0.9 && !player.dead) {
+            runStats.stormT += dt;
+            if (runStats.stormT >= 60) unlockMedal('storm');
+        }
+    }
+    lightning = Math.max(0, lightning - dt);
+}
+
+function drawEnvironment() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const night = envLevel('night'), fog = envLevel('fog'), storm = envLevel('storm');
+    const me = flying || player;   // light / clear area follows your aircraft while flying
+    const px = me ? vw / 2 + (me.x - cam.x) * zoom : vw / 2, py = me ? vh / 2 + (me.y - cam.y) * zoom : vh / 2;
+    if (night > 0.01 || fog > 0.01) {
+        if (!envCanvas) envCanvas = document.createElement('canvas');
+        if (envCanvas.width !== Math.ceil(vw) || envCanvas.height !== Math.ceil(vh)) { envCanvas.width = Math.ceil(vw); envCanvas.height = Math.ceil(vh); }
+        const g = envCanvas.getContext('2d');
+        g.globalCompositeOperation = 'source-over';
+        g.clearRect(0, 0, vw, vh);
+        const dark = night >= fog;
+        g.fillStyle = dark ? 'rgba(4,8,24,.8)' : 'rgba(190,200,206,.92)';
+        g.fillRect(0, 0, vw, vh);
+        g.globalCompositeOperation = 'destination-out';
+        const r = (dark ? 330 : 650) * zoom;
+        const rg = g.createRadialGradient(px, py, r * 0.3, px, py, r);
+        rg.addColorStop(0, 'rgba(0,0,0,1)');
+        rg.addColorStop(1, 'rgba(0,0,0,0)');
+        g.fillStyle = rg;
+        g.fillRect(0, 0, vw, vh);
+        if (dark && player && !player.dead) {
+            // Searchlight / landing-light cone: towards the aim point, or straight ahead when flying
+            const a = flying ? flying.a : Math.atan2(mouse.y - player.y, mouse.x - player.x), len = 1100 * zoom, half = 16 * DEG;
+            const cg = g.createRadialGradient(px, py, 0, px, py, len);
+            cg.addColorStop(0, 'rgba(0,0,0,.95)');
+            cg.addColorStop(1, 'rgba(0,0,0,0)');
+            g.fillStyle = cg;
+            g.beginPath();
+            g.moveTo(px, py);
+            g.arc(px, py, len, a - half, a + half);
+            g.closePath();
+            g.fill();
+            // Fires and explosions light up the night
+            let n = 0;
+            for (const p of particles) {
+                if ((p.kind !== 'fire' && p.kind !== 'flash') || n++ > 40) continue;
+                const sx = vw / 2 + (p.x - cam.x) * zoom, sy = vh / 2 + (p.y - cam.y) * zoom, lr = 90 * zoom;
+                const fg = g.createRadialGradient(sx, sy, 0, sx, sy, lr);
+                fg.addColorStop(0, 'rgba(0,0,0,.7)');
+                fg.addColorStop(1, 'rgba(0,0,0,0)');
+                g.fillStyle = fg;
+                g.fillRect(sx - lr, sy - lr, lr * 2, lr * 2);
+            }
+        }
+        ctx.globalAlpha = Math.max(night, fog);
+        ctx.drawImage(envCanvas, 0, 0, vw, vh);
+        ctx.globalAlpha = 1;
+    }
+    if (storm > 0.01) {
+        ctx.fillStyle = `rgba(15,25,35,${0.35 * storm})`;
+        ctx.fillRect(0, 0, vw, vh);
+        // Rain streaks blown by the wind
+        ctx.strokeStyle = `rgba(200,215,230,${0.35 * storm})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        const wx = env.wind.x / ENV.wind * 10, wy = 22;
+        for (let i = 0; i < 160 * storm; i++) {
+            const x = Math.random() * vw, y = Math.random() * vh;
+            ctx.moveTo(x, y);
+            ctx.lineTo(x + wx, y + wy);
+        }
+        ctx.stroke();
+    }
+    if (lightning > 0) {
+        ctx.fillStyle = `rgba(230,240,255,${lightning * 1.6})`;
+        ctx.fillRect(0, 0, vw, vh);
+    }
+}
+
+// ---------- medals and high scores ----------
+function loadJson(key, def) {
+    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : def; } catch { return def; }
+}
+
+function saveJson(key, v) {
+    try { localStorage.setItem(key, JSON.stringify(v)); } catch { }
+}
+
+function unlockMedal(id) {
+    const got = loadJson('wb-medals', []);
+    if (got.includes(id)) return;
+    got.push(id);
+    saveJson('wb-medals', got);
+    const m = MEDALS.find(x => x.id === id);
+    if (m) toast(`🏅 Prestatie: ${m.name}`, '#ffd24a');
+    if (player) playSound('ping', player.x, player.y, 2);
+}
+
+function saveScore() {
+    if (!diff || !runStats) return;
+    const all = loadJson('wb-scores', {});
+    const list = all[diff.id] || [];
+    list.push({ kills, secs: Math.round(time - runStats.start), date: new Date().toISOString().slice(0, 10), ship: player ? player.st.name : '' });
+    list.sort((a, b) => b.kills - a.kills || a.secs - b.secs);
+    all[diff.id] = list.slice(0, 5);
+    saveJson('wb-scores', all);
+}
+
+export function getMedals() {
+    const got = loadJson('wb-medals', []);
+    return MEDALS.map(m => ({ name: m.name, desc: m.desc, done: got.includes(m.id) }));
+}
+
+export function getScores(diffId) {
+    return loadJson('wb-scores', {})[diffId] || [];
+}
+
+// ---------- per-frame update and screen overlay ----------
+function updateExtras(dt, active) {
+    for (const t of toasts) t.t -= dt;
+    toasts = toasts.filter(t => t.t > 0);
+    if (!active) return;
+    updatePartDamage(player, dt);
+    updateFriendlies(dt);
+    updateDepthCharges(dt);
+    updateFlying(dt);
+    if (player.dead) return;
+    updateHarbors();
+    updateMission(dt);
+    updateAir(dt);
+    updateEnvironment(dt);
+}
+
+function drawHudOverlay() {
+    if (state !== 'playing' && state !== 'paused') return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    let y = 10;
+    const line = (text, color, size = 15) => {
+        ctx.font = `bold ${size}px system-ui, sans-serif`;
+        ctx.fillStyle = 'rgba(0,0,0,.6)';
+        ctx.fillText(text, vw / 2 + 1, y + 1);
+        ctx.fillStyle = color;
+        ctx.fillText(text, vw / 2, y);
+        y += size + 6;
+    };
+    // Flagship health bar
+    const boss = enemies.find(e => e.boss && !e.dead);
+    if (boss) {
+        const bw = Math.min(360, vw * 0.5), bx = vw / 2 - bw / 2;
+        line(`VLAGGENSCHIP  •  torens ${boss.turrets.filter(t => !t.broken).length}/${boss.turrets.length}  •  radar ${boss.radarDead ? 'uit' : 'aan'}`, '#ff8a7a', 13);
+        ctx.fillStyle = 'rgba(0,0,0,.55)';
+        ctx.fillRect(bx - 2, y - 2, bw + 4, 12);
+        ctx.fillStyle = '#d0402a';
+        ctx.fillRect(bx, y, bw * boss.hp / boss.maxHp, 8);
+        y += 18;
+    }
+    if (mission) line('📜 ' + missionText(), '#8ad0ff', 14);
+    if (flying) {
+        const f = flying, st = f.st;
+        const ordName = { bomb: 'bommen', rocket: 'raketten', torpedo: 'torpedo', missile: 'geleide raketten' }[st.ord];
+        line(`✈ ${st.name}  •  pantser ${Math.max(0, Math.round(f.hp))}/${st.hp}${ordName ? `  •  ${ordName}: ${f.ord} (F)` : ''}`, '#cfe0ff', 13);
+        if (f.phase === 'landed') line('🛬 Op de grond — taxi met W/S en A/D, lijn uit op de baan, T: opstijgen  •  E: naar je schip', '#9fe870', 14);
+        else if (f.phase === 'takeoff') line('🛫 Opstijgen…', '#cfe0ff', 14);
+        else if (f.phase === 'landing') line('🛬 Landen…', '#cfe0ff', 14);
+        else line(`⛽ brandstof ${Math.max(0, Math.ceil(f.fuel))}s  •  landen: langzaam en recht over een baan, dan T`, f.fuel < 15 ? '#ff6a5a' : '#cfe0ff', 13);
+    } else if (parkedPlane && player && !player.dead) {
+        line(`✈ T: terug naar je vliegtuig (${parkedPlane.st.name})`, '#ffe08a', 14);
+    } else if (player && !player.dead && planeSel && (isCarrier(player) || airstripNear(player.x, player.y, AIRSTRIP.near))) {
+        line(planeCd > 0 ? `✈ Vliegtuig gereed over ${Math.ceil(planeCd)}s` : isCarrier(player) ? `✈ T: katapultstart met ${planeSel.name}` : `✈ T: opstijgen met ${planeSel.name}`, '#ffe08a', 14);
+    }
+    if (player && !player.dead && !flying) {
+        const parts = [];
+        if (player.fireT > 0) parts.push('🔥 brand');
+        if (player.engineHit) parts.push('⚙ motor kapot');
+        const broken = player.turrets.filter(t => t.broken).length;
+        if (broken) parts.push(`🎯 ${broken} toren(s) kapot`);
+        if (parts.length) line(parts.join('  •  ') + '  (R)', '#ff9a7a', 13);
+        line(depthCd > 0 ? `💣 dieptebommen ${Math.ceil(depthCd)}s` : '💣 dieptebommen gereed (G)', 'rgba(220,235,255,.8)', 12);
+    }
+    for (const t of toasts) {
+        ctx.globalAlpha = clamp(t.t, 0, 1);
+        line(t.text, t.color, 16);
+    }
+    ctx.globalAlpha = 1;
+    // Where is the other vehicle: the ship while flying, the parked plane while sailing
+    if (flying && player && !player.dead) drawLocator(player.x, player.y, '🚢 je schip');
+    else if (parkedPlane) drawLocator(parkedPlane.x, parkedPlane.y, '✈ je vliegtuig');
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
+}
+
+// ---------- airstrips and flying your own aircraft ----------
+const AIRSTRIP = { chance: 0.6, len: 640, width: 46, near: 500, landDist: 260, cooldown: 25, flakRange: 700, taxi: 45, gunMul: 2.5, ordMul: 1.6, fuelMul: 3 };
+let planeSel = null, flying = null, parkedPlane = null, planeCd = 0, tLatch = false, eLatch = false, playerBombs = [];
+
+// Selected aircraft from the hangar (null = none owned)
+export function setPlane(p) { planeSel = p || null; }
+
+// Plane selected instead of a ship: start on the runway of the nearest airstrip island;
+// the ship waits at sea off that island as home base
+export function startFlying() {
+    if (!planeSel || !player) return;
+    let isl = null;
+    for (let r = 6000; r <= 30000 && !isl; r += 6000) {
+        const list = islandsNear(player.x, player.y, r).filter(i => i.airstrip);
+        list.sort((a, b) => Math.hypot(a.x - player.x, a.y - player.y) - Math.hypot(b.x - player.x, b.y - player.y));
+        isl = list[0] || null;
+    }
+    if (!isl) return;
+    // Park the ship in open water just off the island
+    for (let k = 0; k < 40; k++) {
+        const a = rand(0, 2 * Math.PI), d = coastRadius(isl, a) + 350 + k * 20;
+        const x = isl.x + Math.cos(a) * d, y = isl.y + Math.sin(a) * d;
+        if (onIsland(x, y, 200)) continue;
+        player.x = x;
+        player.y = y;
+        player.heading = a;
+        break;
+    }
+    launchFrom(isl);
+    cam.x = flying.x;
+    cam.y = flying.y;
+}
+
+// Airstrip island when (x, y) is on it or within `extra` of its coast
+function airstripNear(x, y, extra) {
+    for (const isl of islandsNear(x, y, ISLAND_MAX_R + extra)) {
+        if (!isl.airstrip) continue;
+        if (Math.hypot(x - isl.x, y - isl.y) < coastAt(isl, x, y) + extra) return isl;
+    }
+    return null;
+}
+
+// A "strip" is an island with an airstrip, or { carrier: ship } for an aircraft carrier deck (moves with the ship)
+const isCarrier = s => !!s && !s.dead && s.st.jets > 0;
+
+function stripFrame(strip) {
+    if (strip.carrier) {
+        const c = strip.carrier;
+        return { x: c.x, y: c.y, a: c.heading, len: c.st.length * 0.8, width: c.st.width * 0.6, vx: Math.cos(c.heading) * c.speed, vy: Math.sin(c.heading) * c.speed, deck: true };
+    }
+    return { x: strip.x, y: strip.y, a: strip.airstrip.a, len: strip.airstrip.len, width: AIRSTRIP.width, vx: 0, vy: 0, deck: false };
+}
+
+// Plane position along (u) / across (v) a runway or flight deck
+function runwayLocal(strip, x, y) {
+    const fr = stripFrame(strip), dx = x - fr.x, dy = y - fr.y;
+    return { u: dx * Math.cos(fr.a) + dy * Math.sin(fr.a), v: -dx * Math.sin(fr.a) + dy * Math.cos(fr.a) };
+}
+
+// Hangar footprint beside the runway (see drawAirstrip), with a small margin
+function onHangar(strip, x, y) {
+    if (strip.carrier) return false;
+    const { u, v } = runwayLocal(strip, x, y), W = AIRSTRIP.width;
+    return u > -52 && u < 48 && v > W / 2 + 8 && v < W / 2 + 74;
+}
+
+// Explode when the runway ends before lift-off or roll-out
+function runwayOverrun(f) {
+    toast('💥 Baan te kort — je vliegtuig is verongelukt', '#ff6a5a');
+    endFlight(true);
+}
+
+// Plane on the ground at the runway threshold (or the carrier's stern), rolling for take-off
+function launchFrom(strip, dir = 1) {
+    const p = planeSel, fr = stripFrame(strip), a = fr.a + (dir < 0 ? Math.PI : 0), half = fr.len / 2;
+    flying = {
+        st: p, x: fr.x - Math.cos(a) * half * 0.85, y: fr.y - Math.sin(a) * half * 0.85, a,
+        speed: 0, thr: 0.8, hp: p.hp, fuel: p.fuel * AIRSTRIP.fuelMul, ord: p.ordCount, gunT: 0, ordT: 0,
+        phase: 'takeoff', alt: 0, strip
+    };
+    player.throttle = strip.carrier ? player.throttle : 0;
+    toast(fr.deck ? `✈ Katapultstart met ${p.name}…` : `✈ Opstijgen met ${p.name}…`, '#cfe0ff');
+    playSound('jet', flying.x, flying.y, 1);
+}
+
+function tryTakeOff() {
+    // A plane left parked on a runway: switch straight back to it, however far away
+    if (parkedPlane) {
+        flying = parkedPlane;
+        parkedPlane = null;
+        player.throttle = 0;
+        toast('✈ Terug in je vliegtuig', '#cfe0ff');
+        return;
+    }
+    if (!planeSel) { toast('✈ Koop eerst een vliegtuig in de hangar', '#ffb08a'); return; }
+    if (planeCd > 0) { toast(`✈ Nieuw vliegtuig gereed over ${Math.ceil(planeCd)}s`, '#ffb08a'); return; }
+    // Aircraft carrier: catapult launch from your own deck, anywhere
+    if (isCarrier(player)) { launchFrom({ carrier: player }); return; }
+    const isl = airstripNear(player.x, player.y, AIRSTRIP.near);
+    if (!isl) { toast('✈ Vaar naar een eiland met een landingsbaan (gele streep op de radar)', '#ffb08a'); return; }
+    launchFrom(isl);
+}
+
+function endFlight(crashed) {
+    if (!flying) return;
+    if (crashed) {
+        explosion(flying.x, flying.y, true);
+        if (!onIsland(flying.x, flying.y)) waterColumn(flying.x, flying.y, 1.4);
+        toast('✈ Je vliegtuig is verloren — je gaat verder op je schip', '#ff8a7a');
+        planeCd = AIRSTRIP.cooldown;
+        parkedPlane = null;
+    } else {
+        // Landed plane stays parked on the airfield; T brings you back to it
+        if (flying.phase === 'landed') { flying.speed = 0; parkedPlane = flying; }
+        toast('🚢 Terug op je schip — T: terug naar je vliegtuig', '#cfe0ff');
+    }
+    flying = null;
+}
+
+// Try to start a landing: low and slow, lined up with a runway or your carrier's deck
+function tryLanding(f) {
+    const st = f.st;
+    const strips = islandsNear(f.x, f.y, ISLAND_MAX_R).filter(i => i.airstrip);
+    if (isCarrier(player)) strips.unshift({ carrier: player });
+    for (const strip of strips) {
+        const fr = stripFrame(strip), { u, v } = runwayLocal(strip, f.x, f.y), half = fr.len / 2;
+        if (Math.abs(u) > half + AIRSTRIP.landDist || Math.abs(v) > fr.width * 2.5) continue;
+        // Runways: either direction; carrier: only in the ship's direction of travel
+        const err = Math.abs(norm(f.a - fr.a)), diffA = fr.deck ? err : Math.min(err, Math.PI - err);
+        if (diffA > 35 * DEG) { toast(fr.deck ? '✈ Nader het vliegdekschip van achteren, in zijn vaarrichting' : '✈ Vlieg recht over de landingsbaan om te landen', '#ffb08a'); return; }
+        if (f.speed > st.minSpeed * 1.4) { toast('✈ Te snel om te landen: minder gas (S)', '#ffb08a'); return; }
+        f.phase = 'landing';
+        f.strip = strip;
+        f.a = err < Math.PI / 2 ? fr.a : fr.a + Math.PI;
+        // Line up exactly on the centre line
+        const uu = clamp(u, -half, half);
+        f.x = fr.x + Math.cos(fr.a) * uu;
+        f.y = fr.y + Math.sin(fr.a) * uu;
+        toast(fr.deck ? '✈ Landen op het vliegdekschip… vanghaak uit' : '✈ Landen…', '#cfe0ff');
+        return;
+    }
+    toast('✈ Landen kan alleen boven een landingsbaan of je vliegdekschip', '#ffb08a');
+}
+
+// Keeps a plane standing on a carrier deck in place as the ship moves and turns
+function rideDeck(f) {
+    if (!f.strip || !f.strip.carrier) return;
+    const c = f.strip.carrier, ca = Math.cos(c.heading), sa = Math.sin(c.heading);
+    f.x = c.x + ca * f.deckU - sa * f.deckV;
+    f.y = c.y + sa * f.deckU + ca * f.deckV;
+    f.a = c.heading + f.deckRel;
+}
+
+function controlPlane(dt) {
+    const f = flying, st = f.st;
+    const tNow = !!keys.KeyT, eNow = !!keys.KeyE;
+    const tPress = tNow && !tLatch, ePress = eNow && !eLatch;
+    tLatch = tNow;
+    eLatch = eNow;
+
+    // Ground phases: take-off roll, landing roll-out, parked on the runway
+    if (f.phase === 'takeoff') {
+        const fr = stripFrame(f.strip);
+        // Carrier: steam catapult; runway: normal take-off run
+        const acc = fr.deck ? st.minSpeed * 1.6 : Math.max(60, st.minSpeed * 0.45);
+        f.speed = Math.min(st.minSpeed * 1.05, f.speed + dt * acc);
+        f.alt = clamp((f.speed - st.minSpeed * 0.6) / (st.minSpeed * 0.45), 0, 1);
+        f.x += (Math.cos(f.a) * f.speed + fr.vx) * dt;
+        f.y += (Math.sin(f.a) * f.speed + fr.vy) * dt;
+        // Runway / deck ends before lift-off: the plane crashes
+        const rl = runwayLocal(f.strip, f.x, f.y);
+        if (f.alt < 1 && (Math.abs(rl.u) > fr.len / 2 + 15 || Math.abs(rl.v) > fr.width * 0.5)) { runwayOverrun(f); return; }
+        if (f.speed >= st.minSpeed) { f.phase = 'air'; f.alt = 1; toast('✈ In de lucht — boven een landingsbaan of je vliegdekschip T om te landen', '#cfe0ff'); }
+        return;
+    }
+    if (f.phase === 'landing') {
+        const fr = stripFrame(f.strip), rl = runwayLocal(f.strip, f.x, f.y);
+        // Brake hard enough to stop on what is left of the runway (arrester wires on a carrier)
+        const dir = Math.cos(norm(f.a - fr.a)) >= 0 ? 1 : -1;
+        const left = Math.max(20, fr.len / 2 - rl.u * dir);
+        const brake = Math.max(fr.deck ? st.minSpeed * 1.5 : 70, f.speed * f.speed / (2 * left * 0.85));
+        f.speed = Math.max(0, f.speed - dt * brake);
+        f.alt = Math.max(0, f.alt - dt * (fr.deck ? 2 : 0.9));
+        f.x += (Math.cos(f.a) * f.speed + fr.vx) * dt;
+        f.y += (Math.sin(f.a) * f.speed + fr.vy) * dt;
+        const nl = runwayLocal(f.strip, f.x, f.y);
+        if (Math.abs(nl.u) > fr.len / 2 + 15 || Math.abs(nl.v) > fr.width * 0.6) { runwayOverrun(f); return; }
+        if (f.speed <= 0) {
+            // Landed: refuel, rearm and repair
+            f.phase = 'landed';
+            f.alt = 0;
+            f.thr = 0;
+            f.fuel = st.fuel * AIRSTRIP.fuelMul;
+            f.ord = st.ordCount;
+            f.hp = st.hp;
+            if (fr.deck) {
+                // Remember the deck spot so the plane rides along with the carrier
+                f.deckU = nl.u;
+                f.deckV = nl.v;
+                f.deckRel = norm(f.a - fr.a);
+                toast('✈ Geland op het vliegdekschip: bijgetankt en herbewapend — taxi terug naar achteren, dan T: katapultstart  •  E: naar je schip', '#9fe870');
+            } else toast('✈ Geland: bijgetankt en herbewapend — taxi naar de baan en T: opstijgen  •  E: naar je schip', '#9fe870');
+        }
+        return;
+    }
+    if (f.phase === 'landed' && f.strip && f.strip.carrier) {
+        // On the carrier deck: rides along; taxi back to the stern yourself, then T = catapult launch
+        if (f.strip.carrier.dead) { endFlight(true); return; }
+        if (ePress) { rideDeck(f); endFlight(false); return; }
+        const fr = stripFrame(f.strip);
+        const up = keys.KeyW || keys.ArrowUp, down = keys.KeyS || keys.ArrowDown;
+        if (up) f.thr = Math.min(1, f.thr + dt * 0.8);
+        if (down) f.thr = Math.max(0, f.thr - dt * 0.8);
+        f.speed = approach(f.speed, AIRSTRIP.taxi * 0.6 * f.thr, dt * 40);
+        const left = keys.KeyA || keys.ArrowLeft, right = keys.KeyD || keys.ArrowRight;
+        const steer = left || right ? (right ? 1 : 0) - (left ? 1 : 0) : wheelAngle / WHEEL_MAX;
+        f.deckRel = norm(f.deckRel + steer * 70 * DEG * dt * clamp(f.speed / 12, 0, 1));
+        const nu = f.deckU + Math.cos(f.deckRel) * f.speed * dt, nv = f.deckV + Math.sin(f.deckRel) * f.speed * dt;
+        // Stay on the deck
+        if (Math.abs(nu) < fr.len / 2 && Math.abs(nv) < fr.width / 2) { f.deckU = nu; f.deckV = nv; } else f.speed = 0;
+        rideDeck(f);
+        if (tPress) {
+            // Launch from where you stand, nose forward; too little deck left means a crash
+            if (Math.abs(norm(f.deckRel)) < 15 * DEG && Math.abs(f.deckV) < fr.width * 0.35) {
+                f.a = fr.a;
+                f.speed = 0;
+                f.phase = 'takeoff';
+                toast(`✈ Katapultstart met ${st.name}…`, '#cfe0ff');
+                playSound('jet', f.x, f.y, 1);
+            } else toast('✈ Taxi naar het midden van het dek en draai met de neus naar voren (W/S rijden, A/D sturen)', '#ffb08a');
+        }
+        return;
+    }
+    if (f.phase === 'landed') {
+        if (ePress) { endFlight(false); return; }
+        // Taxi on the ground: W/S or the lever to roll, A/D or the wheel to steer
+        const up = keys.KeyW || keys.ArrowUp, down = keys.KeyS || keys.ArrowDown;
+        if (up) f.thr = Math.min(1, f.thr + dt * 0.8);
+        if (down) f.thr = Math.max(0, f.thr - dt * 0.8);
+        f.speed = approach(f.speed, AIRSTRIP.taxi * f.thr, dt * 40);
+        const left = keys.KeyA || keys.ArrowLeft, right = keys.KeyD || keys.ArrowRight;
+        const steer = left || right ? (right ? 1 : 0) - (left ? 1 : 0) : wheelAngle / WHEEL_MAX;
+        f.a += steer * 70 * DEG * dt * clamp(f.speed / 15, 0, 1);
+        const nx = f.x + Math.cos(f.a) * f.speed * dt, ny = f.y + Math.sin(f.a) * f.speed * dt;
+        // Stays on land and off the hangar
+        if (terrainHeight(nx, ny) > 0.02 && !onHangar(f.strip, nx, ny)) { f.x = nx; f.y = ny; } else f.speed = 0;
+        if (tPress) {
+            // Take off from where you are: on the runway and lined up with it
+            const rl = runwayLocal(f.strip, f.x, f.y), half = f.strip.airstrip.len / 2;
+            const err = Math.abs(norm(f.a - f.strip.airstrip.a)), aligned = Math.min(err, Math.PI - err) < 15 * DEG;
+            if (Math.abs(rl.u) < half - 10 && Math.abs(rl.v) < AIRSTRIP.width * 0.4 && aligned) {
+                // A short remaining runway is your own risk: run out of it and the plane crashes
+                f.a = err < Math.PI / 2 ? f.strip.airstrip.a : f.strip.airstrip.a + Math.PI;
+                f.phase = 'takeoff';
+                toast(`✈ Opstijgen met ${st.name}…`, '#cfe0ff');
+                playSound('jet', f.x, f.y, 1);
+            } else toast('✈ Taxi eerst op de baan en draai in de lengterichting (W/S rijden, A/D sturen)', '#ffb08a');
+        }
+        return;
+    }
+
+    if (tPress) tryLanding(f);
+    const up = keys.KeyW || keys.ArrowUp, down = keys.KeyS || keys.ArrowDown;
+    if (up) f.thr = Math.min(1, f.thr + dt * 0.8);
+    if (down) f.thr = Math.max(0, f.thr - dt * 0.8);
+    const left = keys.KeyA || keys.ArrowLeft, right = keys.KeyD || keys.ArrowRight;
+    const steer = left || right ? (right ? 1 : 0) - (left ? 1 : 0) : wheelAngle / WHEEL_MAX;
+    f.a += steer * st.turn * DEG * dt;
+    f.speed = approach(f.speed, lerp(st.minSpeed, st.speed, f.thr), dt * 120);
+    f.x += Math.cos(f.a) * f.speed * dt;
+    f.y += Math.sin(f.a) * f.speed * dt;
+    f.fuel -= dt;
+
+    // Forward-firing guns
+    f.gunT -= dt;
+    if ((mouse.down || keys.Space || fireHeld) && f.gunT <= 0) {
+        f.gunT = st.gunRate;
+        const cannon = st.gun === 'cannon', c = Math.cos(f.a), n = Math.sin(f.a);
+        for (let i = 0; i < st.guns; i++) {
+            const off = (i - (st.guns - 1) / 2) * (st.span / (st.guns + 1));
+            const x = f.x + c * st.length * 0.35 - n * off, y = f.y + n * st.length * 0.35 + c * off;
+            const a = f.a + rand(-1.2, 1.2) * DEG;
+            shells.push({ x, y, dx: Math.cos(a), dy: Math.sin(a), speed: 1100 + f.speed, left: cannon ? 800 : 650, enemy: false, dmg: st.gunDamage * AIRSTRIP.gunMul, mg: true, done: false, fromPlane: true });
+        }
+        playSound('mg', f.x, f.y, cannon ? 1.3 : 0.8);
+    }
+    // Bombs / rockets / torpedo / guided missiles
+    f.ordT -= dt;
+    if ((keys.KeyF || specialQueued) && f.ord > 0 && f.ordT <= 0) {
+        dropOrdnance(f);
+        f.ordT = 0.6;
+    }
+    specialQueued = false;
+}
+
+function dropOrdnance(f) {
+    const st = f.st, dx = Math.cos(f.a), dy = Math.sin(f.a), dmg = st.ordDamage * AIRSTRIP.ordMul;
+    f.ord--;
+    switch (st.ord) {
+        case 'bomb':
+            playerBombs.push({ x: f.x, y: f.y, vx: dx * f.speed * 0.5, vy: dy * f.speed * 0.5, t: 0.9, dmg });
+            break;
+        case 'rocket':
+            shells.push({ x: f.x, y: f.y, dx, dy, speed: 900 + f.speed, left: 1000, enemy: false, dmg, done: false, fromPlane: true });
+            addParticle({ kind: 'steam', x: f.x, y: f.y, vx: -dx * 40, vy: -dy * 40, max: 1, size: 4, grow: 10, alpha: 0.6 });
+            playSound('launch', f.x, f.y, 0.7);
+            break;
+        case 'torpedo':
+            shells.push({ x: f.x + dx * 30, y: f.y + dy * 30, dx, dy, speed: TORPEDO.speed, left: TORPEDO.range, enemy: false, dmg, done: false, torp: true, trail: 0 });
+            addParticle({ kind: 'water', x: f.x + dx * 30, y: f.y + dy * 30, vx: 0, vy: 0, max: 0.7, size: 6, grow: 16, alpha: 0.7 });
+            playSound('splash', f.x, f.y, 0.8);
+            break;
+        case 'missile': {
+            const target = nearestEnemy(f.x + dx * 600, f.y + dy * 600, 2500);
+            missiles.push({ x: f.x, y: f.y, a: f.a, speed: f.speed, target, life: MISSILE.life, age: 0, trail: 0 });
+            playSound('launch', f.x, f.y, 0.8);
+            break;
+        }
+    }
+}
+
+function updateFlying(dt) {
+    planeCd = Math.max(0, planeCd - dt);
+    for (const b of playerBombs) {
+        b.t -= dt;
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+        if (b.t > 0) continue;
+        explosion(b.x, b.y, true);
+        if (onIsland(b.x, b.y)) burst(b.x, b.y, 14, 'sand', 70, 1.2, 7);
+        else waterColumn(b.x, b.y, 1.6);
+        for (const e of enemies) {
+            if (e.dead || e.st.sub) continue;
+            if (Math.hypot(e.x - b.x, e.y - b.y) < 70 + e.st.width / 2) damage(e, b.dmg);
+        }
+    }
+    playerBombs = playerBombs.filter(b => b.t > 0);
+    // A plane parked on the carrier deck sails along with the ship
+    if (parkedPlane && parkedPlane.strip && parkedPlane.strip.carrier) {
+        if (parkedPlane.strip.carrier.dead) parkedPlane = null;
+        else rideDeck(parkedPlane);
+    }
+    if (!flying) return;
+    if (player.dead) { endFlight(true); return; }
+    // Enemy flak against your aircraft
+    for (const e of enemies) {
+        if (flying.phase !== 'air') break;
+        if (e.dead || e.st.sub || !e.turrets.length) continue;
+        if (Math.hypot(e.x - flying.x, e.y - flying.y) > AIRSTRIP.flakRange || Math.random() > dt * 0.9) continue;
+        addParticle({ kind: 'smoke', x: flying.x + rand(-45, 45), y: flying.y + rand(-45, 45), vx: 0, vy: 0, max: 1.2, size: 5, grow: 12, alpha: 0.7 });
+        if (Math.random() < 0.35) flying.hp -= 5 * diff.enemyDamage;
+    }
+    if (flying.fuel <= 0 || flying.hp <= 0) endFlight(true);
+}
+
+function drawPlayerPlane() {
+    // Falling bombs from your aircraft
+    for (const b of playerBombs) {
+        ctx.fillStyle = '#1e1e1e';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 2 + b.t * 4, 0, 2 * Math.PI);
+        ctx.fill();
+    }
+    if (parkedPlane) drawPlane(parkedPlane.st, parkedPlane.x, parkedPlane.y, parkedPlane.a, 0, 1, 1, false);
+    if (!flying) return;
+    const f = flying, st = f.st;
+    // Standing still on the ground with the throttle closed: engine off
+    drawPlane(st, f.x, f.y, f.a, f.alt ?? 1, 1, 1, !(f.phase === 'landed' && f.speed < 1 && f.thr < 0.05));
+    // Jet exhaust trail
+    if (st.jet && f.alt > 0.5 && Math.random() < 0.6) {
+        addParticle({ kind: 'steam', x: f.x - Math.cos(f.a) * st.length * 0.55, y: f.y - Math.sin(f.a) * st.length * 0.55, vx: 0, vy: 0, max: 0.5, size: 3, grow: 8, alpha: 0.4 });
+    }
+}
+
+function fighterJetPath() {
+    ctx.beginPath();
+    ctx.moveTo(17, 0);
+    ctx.lineTo(8, -2.5); ctx.lineTo(-2, -3); ctx.lineTo(-10, -18); ctx.lineTo(-14, -18); ctx.lineTo(-10, -3);
+    ctx.lineTo(-16, -3); ctx.lineTo(-20, -9); ctx.lineTo(-22, -9); ctx.lineTo(-20, 0);
+    ctx.lineTo(-22, 9); ctx.lineTo(-20, 9); ctx.lineTo(-16, 3); ctx.lineTo(-10, 3);
+    ctx.lineTo(-14, 18); ctx.lineTo(-10, 18); ctx.lineTo(-2, 3); ctx.lineTo(8, 2.5);
+    ctx.closePath();
+}
+
+// Runway with markings, hangar and windsock
+function drawAirstrip(isl) {
+    const s = isl.airstrip, L = s.len, W = AIRSTRIP.width;
+    ctx.save();
+    ctx.translate(isl.x, isl.y);
+    ctx.rotate(s.a);
+    ctx.fillStyle = 'rgba(0,0,0,.2)';
+    ctx.fillRect(-L / 2 + 4, -W / 2 + 4, L, W);
+    ctx.fillStyle = '#3c3f42';
+    ctx.fillRect(-L / 2, -W / 2, L, W);
+    ctx.strokeStyle = 'rgba(240,240,240,.85)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-L / 2 + 3, -W / 2 + 3, L - 6, W - 6);
+    ctx.setLineDash([22, 18]);
+    ctx.beginPath(); ctx.moveTo(-L / 2 + 40, 0); ctx.lineTo(L / 2 - 40, 0); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(240,240,240,.85)';
+    for (const end of [-1, 1]) for (let k = -3; k <= 3; k++) ctx.fillRect(end * (L / 2 - 22) - 8, k * 5 - 1.5, 16, 3);
+    // Hangar and windsock beside the runway
+    ctx.fillStyle = 'rgba(0,0,0,.3)';
+    ctx.fillRect(-36, W / 2 + 22, 76, 44);
+    ctx.fillStyle = '#7d8790';
+    ctx.fillRect(-40, W / 2 + 18, 76, 44);
+    ctx.fillStyle = 'rgba(255,255,255,.18)';
+    for (let x = -36; x < 36; x += 8) ctx.fillRect(x, W / 2 + 18, 3, 44);
+    ctx.fillStyle = '#ff7a2a';
+    ctx.fillRect(60, W / 2 + 14, 14, 4);
+    ctx.restore();
+}
+
+// ---------- detailed aircraft rendering (cached sprites, like the ships) ----------
+const PLANE_ENGINES = { lancaster: 4, mosquito: 2 };
+// Enemy bomber model
+const ENEMY_PLANE = { id: 'enemy-bomber', name: 'Bommenwerper', length: 30, span: 44, color: '#5a5f4a', engines: 2, enemy: true };
+const planeSprites = new Map();
+
+// Engine positions (local, x = forward) and fuselage half-width
+function planeLayout(p) {
+    const L = p.length, S2 = p.span / 2, n = p.jet ? 0 : (PLANE_ENGINES[p.id] || p.engines || 1);
+    const engines = [];
+    if (n === 1) engines.push([L * 0.5, 0]);
+    else if (n === 2) engines.push([L * 0.12, -S2 * 0.32], [L * 0.12, S2 * 0.32]);
+    else if (n >= 4) engines.push([L * 0.1, -S2 * 0.28], [L * 0.1, S2 * 0.28], [L * 0.06, -S2 * 0.56], [L * 0.06, S2 * 0.56]);
+    return { L, S2, engines, fw: L * (n > 1 ? 0.075 : 0.065) };
+}
+
+function planeSprite(p) {
+    const key = `${p.id || p.name}|${p.color}`;
+    let sp = planeSprites.get(key);
+    if (!sp) planeSprites.set(key, sp = buildPlaneSprite(p));
+    return sp;
+}
+
+// Body, wings, tail, nacelles, canopy, markings — and a matching black silhouette for the shadow
+function buildPlaneSprite(p) {
+    const lay = planeLayout(p), pad = 3;
+    const w = lay.L + pad * 2, h = lay.S2 * 2 + pad * 2, S = Math.max(3, spriteScale * 1.6);
+    const c = makeCanvas(w * S, h * S), sh = makeCanvas(w * S, h * S);
+    for (const [cv, shadow] of [[c, false], [sh, true]]) {
+        const g = cv.getContext('2d');
+        g.setTransform(S, 0, 0, S, cv.width / 2, cv.height / 2);
+        drawPlaneBody(g, p, lay, shadow);
+    }
+    return { canvas: c, shadow: sh, w, h, lay };
+}
+
+function drawPlaneBody(g, p, lay, shadow) {
+    const { L, S2, engines, fw } = lay, base = p.color;
+    const lit = (y0, y1, k = 1) => {
+        if (shadow) return '#000';
+        const gr = g.createLinearGradient(0, y0, 0, y1);
+        gr.addColorStop(0, shade(base, 1.35 * k));
+        gr.addColorStop(0.5, shade(base, 1.0 * k));
+        gr.addColorStop(1, shade(base, 0.62 * k));
+        return gr;
+    };
+    const line = (x0, y0, x1, y1, a = 0.35, wdt = 0.25) => {
+        g.strokeStyle = `rgba(0,0,0,${a})`;
+        g.lineWidth = wdt;
+        g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+    };
+
+    // Wings: straight with rounded tips, or swept for jets
+    g.beginPath();
+    if (p.jet) {
+        g.moveTo(L * 0.1, -fw); g.lineTo(-L * 0.18, -S2); g.lineTo(-L * 0.3, -S2); g.lineTo(-L * 0.22, -fw);
+        g.lineTo(-L * 0.22, fw); g.lineTo(-L * 0.3, S2); g.lineTo(-L * 0.18, S2); g.lineTo(L * 0.1, fw);
+    } else {
+        g.moveTo(L * 0.13, -fw); g.lineTo(L * 0.05, -S2 * 0.96); g.quadraticCurveTo(L * 0.01, -S2 * 1.02, -L * 0.04, -S2 * 0.97);
+        g.lineTo(-L * 0.1, -fw); g.lineTo(-L * 0.1, fw); g.lineTo(-L * 0.04, S2 * 0.97);
+        g.quadraticCurveTo(L * 0.01, S2 * 1.02, L * 0.05, S2 * 0.96); g.lineTo(L * 0.13, fw);
+    }
+    g.closePath();
+    g.fillStyle = lit(-S2, S2);
+    g.fill();
+    if (!shadow) {
+        g.strokeStyle = 'rgba(0,0,0,.45)';
+        g.lineWidth = 0.3;
+        g.stroke();
+        // Flaps / ailerons and a spar line
+        for (const s of [-1, 1]) {
+            if (p.jet) { line(-L * 0.2, s * fw * 1.4, -L * 0.27, s * S2 * 0.9); line(-L * 0.06, s * fw * 1.2, -L * 0.2, s * S2 * 0.85, 0.2); }
+            else {
+                line(-L * 0.06, s * fw * 1.3, -L * 0.02, s * S2 * 0.92);
+                line(-L * 0.08, s * S2 * 0.55, -L * 0.03, s * S2 * 0.55, 0.4);
+                line(L * 0.08, s * fw * 1.3, L * 0.04, s * S2 * 0.9, 0.18);
+            }
+        }
+    }
+
+    // Tailplane
+    g.beginPath();
+    const ts = S2 * (p.jet ? 0.4 : 0.36);
+    g.moveTo(-L * 0.34, -fw * 0.6); g.lineTo(-L * 0.41, -ts); g.lineTo(-L * 0.48, -ts); g.lineTo(-L * 0.46, -fw * 0.4);
+    g.lineTo(-L * 0.46, fw * 0.4); g.lineTo(-L * 0.48, ts); g.lineTo(-L * 0.41, ts); g.lineTo(-L * 0.34, fw * 0.6);
+    g.closePath();
+    g.fillStyle = lit(-ts, ts, 0.95);
+    g.fill();
+    if (!shadow) { g.strokeStyle = 'rgba(0,0,0,.4)'; g.lineWidth = 0.25; g.stroke(); line(-L * 0.44, -ts * 0.9, -L * 0.44, ts * 0.9, 0.25); }
+
+    // Engine nacelles on the wings
+    for (const [ex, ey] of engines) {
+        if (ey === 0) continue;
+        g.fillStyle = lit(ey - fw, ey + fw, 0.9);
+        g.beginPath();
+        g.ellipse(ex + L * 0.03, ey, L * 0.13, fw * 0.75, 0, 0, 2 * Math.PI);
+        g.fill();
+        if (!shadow) {
+            g.fillStyle = 'rgba(20,20,20,.55)';
+            g.beginPath(); g.ellipse(ex + L * 0.15, ey, L * 0.02, fw * 0.55, 0, 0, 2 * Math.PI); g.fill();
+            // Exhaust stain streaking back over the wing
+            const st = g.createLinearGradient(ex, 0, ex - L * 0.2, 0);
+            st.addColorStop(0, 'rgba(30,30,30,.35)');
+            st.addColorStop(1, 'rgba(30,30,30,0)');
+            g.fillStyle = st;
+            g.fillRect(ex - L * 0.2, ey - fw * 0.3, L * 0.2, fw * 0.6);
+        }
+    }
+
+    // Fuselage
+    g.beginPath();
+    g.moveTo(L * 0.5, 0);
+    g.bezierCurveTo(L * 0.5, -fw * 0.95, L * 0.32, -fw * 1.1, L * 0.12, -fw);
+    g.lineTo(-L * 0.34, -fw * 0.55);
+    g.quadraticCurveTo(-L * 0.5, -fw * 0.32, -L * 0.5, 0);
+    g.quadraticCurveTo(-L * 0.5, fw * 0.32, -L * 0.34, fw * 0.55);
+    g.lineTo(L * 0.12, fw);
+    g.bezierCurveTo(L * 0.32, fw * 1.1, L * 0.5, fw * 0.95, L * 0.5, 0);
+    g.closePath();
+    g.fillStyle = lit(-fw, fw, 1.05);
+    g.fill();
+    if (shadow) return;
+    g.strokeStyle = 'rgba(0,0,0,.5)';
+    g.lineWidth = 0.3;
+    g.stroke();
+    // Panel lines and the vertical fin seen from above
+    for (const x of [0.3, 0.05, -0.15, -0.3]) line(L * x, -fw * 0.85, L * x, fw * 0.85, 0.22, 0.2);
+    g.fillStyle = shade(base, 0.7);
+    g.fillRect(-L * 0.5, -fw * 0.16, L * 0.15, fw * 0.32);
+
+    // Cockpit canopy with glass gradient and frames
+    const cx = p.jet ? L * 0.27 : L * 0.16, cr = L * (p.jet ? 0.1 : 0.08);
+    const glass = g.createLinearGradient(cx, -fw * 0.6, cx, fw * 0.6);
+    glass.addColorStop(0, '#cfeaff');
+    glass.addColorStop(0.45, '#6a9cc0');
+    glass.addColorStop(1, '#1e3850');
+    g.fillStyle = glass;
+    g.beginPath(); g.ellipse(cx, 0, cr, fw * 0.55, 0, 0, 2 * Math.PI); g.fill();
+    g.strokeStyle = 'rgba(30,30,30,.7)';
+    g.lineWidth = 0.25;
+    g.stroke();
+    line(cx - cr * 0.3, -fw * 0.5, cx - cr * 0.3, fw * 0.5, 0.6, 0.2);
+    line(cx + cr * 0.3, -fw * 0.45, cx + cr * 0.3, fw * 0.45, 0.6, 0.2);
+    g.fillStyle = 'rgba(255,255,255,.55)';
+    g.beginPath(); g.ellipse(cx + cr * 0.2, -fw * 0.25, cr * 0.35, fw * 0.12, 0, 0, 2 * Math.PI); g.fill();
+    // Bombers: glazed nose and tail gun turret
+    if (engines.length > 1) {
+        g.fillStyle = glass;
+        g.beginPath(); g.ellipse(L * 0.45, 0, L * 0.05, fw * 0.6, 0, 0, 2 * Math.PI); g.fill();
+        g.beginPath(); g.arc(-L * 0.49, 0, fw * 0.45, 0, 2 * Math.PI); g.fill();
+    }
+    // Jets: air intakes beside the cockpit and the exhaust nozzle
+    if (p.jet) {
+        g.fillStyle = '#151515';
+        for (const s of [-1, 1]) { g.beginPath(); g.ellipse(L * 0.17, s * fw * 0.95, L * 0.05, fw * 0.25, 0, 0, 2 * Math.PI); g.fill(); }
+        g.beginPath(); g.arc(-L * 0.5, 0, fw * 0.4, 0, 2 * Math.PI); g.fill();
+    }
+
+    // Under-wing stores
+    if (p.ord === 'rocket') {
+        g.fillStyle = '#d8d8d0';
+        for (const s of [-1, 1]) for (let k = 0; k < Math.min(4, Math.ceil((p.ordCount || 2) / 2)); k++) g.fillRect(-L * 0.04, s * (S2 * 0.38 + k * S2 * 0.1) - 0.4, L * 0.16, 0.8);
+    } else if (p.ord === 'torpedo') {
+        g.fillStyle = 'rgba(40,46,50,.9)';
+        g.beginPath(); g.ellipse(L * 0.02, 0, L * 0.22, fw * 0.3, 0, 0, 2 * Math.PI); g.fill();
+    } else if (p.ord === 'missile') {
+        g.fillStyle = '#eeeeee';
+        for (const s of [-1, 1]) for (const k of [0.45, 0.7]) g.fillRect(-L * 0.18, s * S2 * k - 0.5, L * 0.18, 1);
+    }
+
+    // National markings: roundels on the wings, fin flash
+    const rr = Math.min(fw * 1.1, S2 * 0.12);
+    for (const s of [-1, 1]) {
+        const rx = p.jet ? -L * 0.17 : -L * 0.01, ry = s * S2 * 0.66;
+        const rings = p.enemy ? ['#ffffff', '#c03a2a'] : ['#e8d070', '#2a4aa0', '#ffffff', '#c03a2a'];
+        rings.forEach((col, i) => {
+            g.fillStyle = col;
+            g.beginPath(); g.arc(rx, ry, rr * (1 - i / rings.length), 0, 2 * Math.PI); g.fill();
+        });
+    }
+    // Weathering speckles
+    for (let k = 0; k < 40; k++) {
+        g.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.08)';
+        g.fillRect(rand(-L * 0.45, L * 0.45), rand(-fw * 0.8, fw * 0.8), 0.6, 0.6);
+    }
+}
+
+// Draws an aircraft with its shadow (alt 0 = on the ground, 1 = flying); engine off = no burner, still propeller
+function drawPlane(p, x, y, a, alt = 1, k = 1, alpha = 1, engine = true) {
+    const sp = planeSprite(p), sc = (0.85 + 0.15 * alt) * k, { L, S2, engines } = sp.lay;
+    ctx.save();
+    ctx.translate(x + 45 * alt + 3, y + 55 * alt + 3);
+    ctx.rotate(a);
+    ctx.scale(sc, sc);
+    ctx.globalAlpha = 0.28 * alpha;
+    ctx.drawImage(sp.shadow, -sp.w / 2, -sp.h / 2, sp.w, sp.h);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(a);
+    ctx.scale(sc, sc);
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(sp.canvas, -sp.w / 2, -sp.h / 2, sp.w, sp.h);
+    if (p.jet) {
+        if (engine) {
+            // Afterburner glow
+            const gl = ctx.createRadialGradient(-L * 0.52, 0, 0, -L * 0.52, 0, L * 0.12);
+            gl.addColorStop(0, 'rgba(255,200,120,.75)');
+            gl.addColorStop(1, 'rgba(255,120,40,0)');
+            ctx.fillStyle = gl;
+            ctx.beginPath(); ctx.arc(-L * 0.52, 0, L * 0.12, 0, 2 * Math.PI); ctx.fill();
+        }
+    } else {
+        // Running: blur disc plus faint spinning blades; stopped: three solid blades standing still
+        for (const [ex, ey] of engines) {
+            const px = ey === 0 ? L * 0.51 : ex + L * 0.17, r = ey === 0 ? L * 0.17 : S2 * 0.12;
+            if (engine) {
+                ctx.fillStyle = 'rgba(210,210,210,.16)';
+                ctx.beginPath(); ctx.ellipse(px, ey, r * 0.18, r, 0, 0, 2 * Math.PI); ctx.fill();
+            }
+            ctx.strokeStyle = engine ? 'rgba(40,40,40,.5)' : '#2a2a2a';
+            ctx.lineWidth = engine ? 0.6 : 1.1;
+            const spin = engine ? time * 45 + ey : 0.4 + ey;
+            ctx.beginPath();
+            for (let b = 0; b < 3; b++) {
+                const ba = spin + b * 2.094;
+                ctx.moveTo(px, ey);
+                ctx.lineTo(px, ey + Math.sin(ba) * r);
+            }
+            ctx.stroke();
+            ctx.fillStyle = '#222';
+            ctx.beginPath(); ctx.arc(px, ey, Math.max(0.6, r * 0.12), 0, 2 * Math.PI); ctx.fill();
+        }
+    }
+    ctx.restore();
+}
+
+// Screen marker for a world point: a label above it when visible, else an arrow at the screen edge with distance
+function drawLocator(wx, wy, label) {
+    const sx = vw / 2 + (wx - cam.x) * zoom, sy = vh / 2 + (wy - cam.y) * zoom;
+    const d = Math.round(Math.hypot(wx - (flying || player || cam).x, wy - (flying || player || cam).y));
+    const m = 46;
+    ctx.font = 'bold 13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (sx > m && sx < vw - m && sy > m && sy < vh - m) {
+        ctx.fillStyle = 'rgba(0,0,0,.55)';
+        ctx.fillText(label, sx + 1, sy - 34 + 1);
+        ctx.fillStyle = '#ffe08a';
+        ctx.fillText(label, sx, sy - 34);
+        return;
+    }
+    // Clamp the direction to the screen border
+    const a = Math.atan2(sy - vh / 2, sx - vw / 2);
+    const kx = (vw / 2 - m) / Math.max(1e-6, Math.abs(Math.cos(a))), ky = (vh / 2 - m) / Math.max(1e-6, Math.abs(Math.sin(a)));
+    const r = Math.min(kx, ky), ex = vw / 2 + Math.cos(a) * r, ey = vh / 2 + Math.sin(a) * r;
+    ctx.save();
+    ctx.translate(ex, ey);
+    ctx.fillStyle = 'rgba(0,0,0,.55)';
+    ctx.beginPath(); ctx.arc(0, 0, 24, 0, 2 * Math.PI); ctx.fill();
+    ctx.rotate(a);
+    ctx.fillStyle = '#ffe08a';
+    ctx.beginPath(); ctx.moveTo(22, 0); ctx.lineTo(12, -7); ctx.lineTo(12, 7); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = '#ffe08a';
+    ctx.fillText(label.split(' ')[0], ex, ey - 4);
+    ctx.font = 'bold 10px system-ui, sans-serif';
+    ctx.fillText(d >= 1000 ? `${(d / 1000).toFixed(1)} km` : `${d} m`, ex, ey + 10);
+}
+
+// ---------- aircraft engine sound ----------
+// Piston: detuned sawtooth firing pulses + square blade beat through a lowpass, exhaust noise
+// chopped at the firing rate. Jet: broadband roar, low rumble and a rising turbine whine.
+let planeAudio = null;
+
+function buildPlaneAudio(st) {
+    const ac = audio.ctx, nodes = [];
+    const out = ac.createGain();
+    out.gain.value = 0;
+    out.connect(audio.master);
+    const gain = v => { const g = ac.createGain(); g.gain.value = v; return g; };
+    const filt = (type, f, q = 0.7) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; };
+    const noise = buf => { const s = ac.createBufferSource(); s.buffer = buf; s.loop = true; s.playbackRate.value = rand(0.9, 1.1); nodes.push(s); return s; };
+    const osc = (type, f) => { const o = ac.createOscillator(); o.type = type; o.frequency.value = f; nodes.push(o); return o; };
+    const p = { key: st.id, out, nodes };
+    // Wind rush over the airframe
+    const wf = filt('bandpass', 1300, 0.4);
+    p.windG = gain(0);
+    noise(audio.noise).connect(wf);
+    wf.connect(p.windG);
+    p.windG.connect(out);
+    if (st.jet) {
+        p.roarF = filt('lowpass', 1200, 0.5);
+        p.roarG = gain(0.8);
+        noise(audio.noise).connect(p.roarF);
+        p.roarF.connect(p.roarG);
+        p.roarG.connect(out);
+        const rum = filt('lowpass', 180, 0.6);
+        noise(audio.brown).connect(rum);
+        rum.connect(gain(1.2)).connect(out);
+        p.whine = osc('sine', 2000);
+        p.whine.connect(gain(0.03)).connect(out);
+        p.whine2 = osc('sine', 3000);
+        p.whine2.connect(gain(0.012)).connect(out);
+    } else {
+        const engines = Math.min(2, PLANE_ENGINES[st.id] || 1);
+        p.toneF = filt('lowpass', 900, 0.8);
+        p.toneF.connect(out);
+        p.osc = [];
+        p.blade = [];
+        for (let i = 0; i < engines; i++) {
+            const o = osc('sawtooth', 120);
+            o.connect(gain(0.3)).connect(p.toneF);
+            p.osc.push(o);
+            const b = osc('square', 40);
+            b.connect(gain(0.18)).connect(p.toneF);
+            p.blade.push(b);
+        }
+        const bf = filt('bandpass', 420, 0.8), ng = gain(0.4);
+        noise(audio.noise).connect(bf);
+        bf.connect(ng);
+        ng.connect(out);
+        p.am = osc('square', 120);
+        p.am.connect(gain(0.35)).connect(ng.gain);
+    }
+    nodes.forEach(n => n.start());
+    return p;
+}
+
+function updatePlaneSound() {
+    if (!audio) return;
+    const t = audio.ctx.currentTime;
+    const st = flying && state === 'playing' ? flying.st : null;
+    // Different (or no) aircraft: fade out and stop the old engine
+    if (planeAudio && (!st || planeAudio.key !== st.id)) {
+        const old = planeAudio;
+        old.out.gain.setTargetAtTime(0, t, 0.25);
+        setTimeout(() => old.nodes.forEach(n => { try { n.stop(); } catch { } }), 1200);
+        planeAudio = null;
+    }
+    if (!st) return;
+    if (!planeAudio) planeAudio = buildPlaneAudio(st);
+    const p = planeAudio, f = flying;
+    // Engine power: taxiing is near idle, in the air it follows the throttle
+    const pw = f.phase === 'landed' ? clamp(0.12 + f.speed / AIRSTRIP.taxi * 0.3, 0, 1)
+        : f.phase === 'landing' ? 0.2 : f.phase === 'takeoff' ? 1 : 0.3 + f.thr * 0.7;
+    const sp = clamp(f.speed / st.speed, 0, 1);
+    if (st.jet) {
+        p.roarF.frequency.setTargetAtTime(500 + pw * 2800, t, 0.3);
+        p.roarG.gain.setTargetAtTime(0.35 + pw * 0.9, t, 0.3);
+        p.whine.frequency.setTargetAtTime(1300 + pw * 2700, t, 0.5);
+        p.whine2.frequency.setTargetAtTime((1300 + pw * 2700) * 1.5, t, 0.5);
+    } else {
+        // Firing frequency of the cylinders and the propeller blade beat
+        const fire = 60 + pw * 120;
+        p.osc.forEach((o, i) => o.frequency.setTargetAtTime(fire * (1 + i * 0.013), t, 0.25));
+        p.blade.forEach((o, i) => o.frequency.setTargetAtTime(fire * 0.33 * (1 + i * 0.017), t, 0.25));
+        p.am.frequency.setTargetAtTime(fire, t, 0.25);
+        p.toneF.frequency.setTargetAtTime(450 + pw * 1500, t, 0.3);
+    }
+    p.windG.gain.setTargetAtTime(sp * 0.5 * (f.alt ?? 1), t, 0.4);
+    // Standing still with the throttle closed: engine off (silent)
+    const off = f.phase === 'landed' && f.speed < 1 && f.thr < 0.05;
+    p.out.gain.setTargetAtTime(muted || off ? 0 : 0.15, t, 0.3);
+}
+
+// Hangar preview: an aircraft over the sea
+export function drawPlanePreview(canvasId, p) {
+    const c = document.getElementById(canvasId);
+    if (!c || !p) return;
+    const main = ctx;
+    ctx = c.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const g = ctx.createLinearGradient(0, 0, 0, c.height);
+    g.addColorStop(0, '#2a6a90');
+    g.addColorStop(1, '#13425f');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, c.width, c.height);
+    const k = Math.min((c.width - 20) / p.span, (c.height - 16) / p.length) * 0.95;
+    ctx.translate(c.width / 2 - 8, c.height / 2 - 8);
+    ctx.scale(k, k);
+    // Nose up in the preview; slight shadow offset for depth
+    drawPlane(p, 0, 0, -Math.PI / 2, 0.12);
+    ctx = main;
 }
