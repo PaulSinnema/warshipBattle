@@ -57,7 +57,12 @@
             <button class="fix" data-key="KeyT" title="Opstijgen / landen">✈</button>
             <button class="fix" data-key="KeyE" title="Naar je schip (na landen)">🚢</button>
         </div>
-        @* Throttle lever removed: the joystick handles ahead / astern too *@
+        @* Throttle lever: only shown while your aircraft is in the air (top = full power, bottom = minimum) *@
+        <div class="throttle" id="throttle" style="display:none">
+            <div class="thr-mark" style="top:0">VOL</div>
+            <div class="thr-mark" style="bottom:0">MIN</div>
+            <div class="thr-knob" id="thrKnob"><span id="thrLabel">0%</span></div>
+        </div>
     </div>
 </div>
 

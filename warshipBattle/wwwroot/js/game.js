@@ -521,7 +521,7 @@ const AIM_SNAP = 90;          // touch aim snaps onto an enemy within this many 
 let wheelAngle = 0, autoAim = false, fireHeld = false, touchAim = false;
 let stickX = 0, stickY = 0;   // joystick knob offset, -1..1
 // Joystick up/down = throttle (-1..1); only applied once the joystick has been used (keyboard players unaffected)
-let stickThrottle = 0, stickUsed = false;
+let stickThrottle = 0, stickUsed = false, stickActive = false;
 
 function bindTouchControls() {
             // Push left/right to steer, up/down for ahead/astern; springs back to the centre on release
@@ -540,6 +540,7 @@ function bindTouchControls() {
             wheelAngle = curve(dx) * WHEEL_MAX;
             stickThrottle = -curve(dy);   // up = ahead / more power
             stickUsed = true;
+            stickActive = true;
         };
         stick.addEventListener('touchstart', e => {
             e.preventDefault();
@@ -558,6 +559,7 @@ function bindTouchControls() {
                 stickX = stickY = 0;
                 wheelAngle = 0;
                 stickThrottle = 0;
+                stickActive = false;
             }
         };
         stick.addEventListener('touchend', end);
@@ -598,15 +600,11 @@ function bindTouchControls() {
 
     const thr = document.getElementById('throttle');
     if (thr) {
-        // Top = full ahead, 2/3 down = stop, bottom = half astern; snaps to stop
+        // Aircraft power lever: top = full power, bottom = minimum (only shown in the air)
         const setFrom = t => {
             const r = thr.getBoundingClientRect();
             const f = clamp((t.clientY - r.top) / r.height, 0, 1);
-            let v = f <= 2 / 3 ? 1 - f * 1.5 : -(f - 2 / 3) * 1.5;
-            if (Math.abs(v) < 0.06) v = 0;
-            // Flying: the lever sets the aircraft's power (0..100%)
-            if (flying) flying.thr = clamp(v, 0, 1);
-            else if (player && !player.dead) player.throttle = v;
+            if (flying) flying.thr = clamp(1 - f, 0, 1);
         };
         const on = e => { e.preventDefault(); setFrom(e.targetTouches[0] || e.changedTouches[0]); };
         thr.addEventListener('touchstart', on, { passive: false });
@@ -636,10 +634,14 @@ function updateTouchUi() {
     if (rim) rim.style.transform = `rotate(${wheelAngle}deg)`;
     const knob2 = document.getElementById('stickKnob');
     if (knob2) knob2.style.transform = `translate(${stickX * 55}%, ${stickY * 55}%)`;
+    // Power lever: visible only while your aircraft is in the air
+    const lever = document.getElementById('throttle');
+    const showLever = !!flying && flying.phase === 'air' && state === 'playing';
+    if (lever) lever.style.display = showLever ? '' : 'none';
     const knob = document.getElementById('thrKnob');
-    if (knob && player) {
-        const t = flying ? flying.thr : player.throttle;
-        knob.style.top = (t >= 0 ? (1 - t) / 1.5 : 2 / 3 + -t / 1.5) * 100 + '%';
+    if (knob && showLever) {
+        const t = clamp(flying.thr, 0, 1);
+        knob.style.top = (1 - t) * 100 + '%';
         const lbl = document.getElementById('thrLabel');
         if (lbl) lbl.textContent = Math.round(t * 100) + '%';
     }
@@ -5380,9 +5382,9 @@ function controlPlane(dt) {
     const tPress = tNow && !tLatch, ePress = eNow && !eLatch;
     tLatch = tNow;
     eLatch = eNow;
-    // Phone joystick up/down: in the air around half power (centre = 50%); on the ground up = taxi
-    if (stickUsed && !(keys.KeyW || keys.ArrowUp || keys.KeyS || keys.ArrowDown))
-        f.thr = f.phase === 'air' ? clamp(0.5 + stickThrottle * 0.5, 0, 1) : (stickThrottle >= 0 ? stickThrottle : stickThrottle * 0.5);
+    // Phone joystick on the ground: up = taxi forward, down = reverse (in the air: see direction steering below)
+    if (stickUsed && f.phase !== 'air' && !(keys.KeyW || keys.ArrowUp || keys.KeyS || keys.ArrowDown))
+        f.thr = stickThrottle >= 0 ? stickThrottle : stickThrottle * 0.5;
 
     // Ground phases: take-off roll, landing roll-out, parked on the runway
     if (f.phase === 'takeoff') {
@@ -5492,8 +5494,16 @@ function controlPlane(dt) {
     if (up) f.thr = Math.min(1, f.thr + dt * 0.8);
     if (down) f.thr = Math.max(0, f.thr - dt * 0.8);
     const left = keys.KeyA || keys.ArrowLeft, right = keys.KeyD || keys.ArrowRight;
-    const steer = left || right ? (right ? 1 : 0) - (left ? 1 : 0) : wheelAngle / WHEEL_MAX;
-    f.a += steer * st.turn * DEG * dt;
+    const stickMag = Math.hypot(stickX, stickY);
+    if (!left && !right && stickActive && stickMag > 0.2) {
+        // Phone joystick = direction: the plane turns towards where the stick points (up = up on screen);
+        // power comes from the lever (or W/S)
+        const want = Math.atan2(stickY, stickX);
+        f.a += clamp(norm(want - f.a), -st.turn * DEG * dt, st.turn * DEG * dt);
+    } else {
+        const steer = left || right ? (right ? 1 : 0) - (left ? 1 : 0) : 0;
+        f.a += steer * st.turn * DEG * dt;
+    }
     f.speed = approach(f.speed, lerp(st.minSpeed, st.speed, f.thr), dt * 120);
     f.x += Math.cos(f.a) * f.speed * dt;
     f.y += Math.sin(f.a) * f.speed * dt;
