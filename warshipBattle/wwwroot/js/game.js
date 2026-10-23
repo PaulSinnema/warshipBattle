@@ -1538,8 +1538,9 @@ function updateShells(dt) {
     shells = shells.filter(s => !s.done);
 }
 
+// Any enemy the jets can attack (submerged submarines are not bomb targets)
 function anyEnemy() {
-    return enemies.some(e => !e.dead);
+    return enemies.some(e => !e.dead && !e.st.sub);
 }
 
 // Jets prefer distant ships that no other jet is already attacking
@@ -1823,8 +1824,10 @@ function updateJets(dt) {
             if (!j.target && j.bomb > 0 && anyEnemy()) {
                 // Bombs left but every ship is already being bombed: loiter over the enemy, not the carrier
                 const e = nearestEnemy(j.x, j.y, Infinity);
-                const ang = Math.atan2(j.y - e.y, j.x - e.x) + 0.6;
-                steerJet(j, e.x + Math.cos(ang) * 350, e.y + Math.sin(ang) * 350, dt);
+                if (e) {
+                    const ang = Math.atan2(j.y - e.y, j.x - e.x) + 0.6;
+                    steerJet(j, e.x + Math.cos(ang) * 350, e.y + Math.sin(ang) * 350, dt);
+                }
             } else if (!j.target) {
                 j.phase = 'hold';
                 j.holdSince = time;
